@@ -997,6 +997,30 @@ INVERTER_DEF = {
         "support_charge_freeze": False,
         "support_discharge_freeze": False,
     },
+    "LP": {
+        "name": "LuxPower",
+        "has_rest_api": False,
+        "has_mqtt_api": False,
+        "output_charge_control": "none",
+        "has_charge_enable_time": True,
+        "has_discharge_enable_time": True,
+        "has_service_api": False,
+        "has_target_soc": False,
+        "has_reserve_soc": False,
+        "charge_time_format": "H M",
+        "charge_time_entity_is_option": False,
+        #"soc_units": "kWh",
+        "soc_units": "%",
+        "num_load_entities": 1,
+        "has_ge_inverter_mode": False,
+        "time_button_press": False,
+        "clock_time_format": "%H:%M:%S",
+        "write_and_poll_sleep": 10,
+        "has_time_window": True,
+        "support_charge_freeze": False,
+        "support_discharge_freeze": False,
+    },
+
 }
 
 
