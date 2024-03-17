@@ -26,7 +26,7 @@ from multiprocessing import Pool, cpu_count
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.16.5"
+THIS_VERSION = "v7.16.7"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -896,7 +896,7 @@ INVERTER_DEF = {
         "has_charge_enable_time": False,
         "has_discharge_enable_time": False,
         "has_target_soc": False,
-        "has_reserve_soc": True,
+        "has_reserve_soc": False,
         "charge_time_format": "H M",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -2789,15 +2789,21 @@ class Inverter:
         Returns:
             None
         """
-        if self.soc_percent >= float(current_charge_limit):
+        charge_power = self.base.get_arg("charge_rate", index=self.id, default=2600.0)
+        if self.soc_percent > float(current_charge_limit):
             # If current SOC is above Target SOC, turn Grid Charging off
             self.alt_charge_discharge_enable("charge", False, grid=True, timed=False)
             self.base.log(f"Current SOC {self.soc_percent}% is greater than Target SOC {current_charge_limit}. Grid Charge disabled.")
+        elif self.soc_percent == float(current_charge_limit):  # If SOC target is reached
+            self.alt_charge_discharge_enable("charge", True, grid=True, timed=False)  # Make sure charging is on
+            self.set_current_from_power("charge", (0))  # Set charge current to zero (i.e hold SOC)
+            self.base.log(f"Current SOC {self.soc_percent}% is same as Target SOC {current_charge_limit}. Grid Charge enabled, Amps rate set to 0.")
         else:
             # If we drop below the target, turn grid charging back on and make sure the charge current is correct
             self.alt_charge_discharge_enable("charge", True, grid=True, timed=False)
             if self.inv_output_charge_control == "current":
-                self.set_current_from_power("charge", self.battery_rate_max_charge * MINUTE_WATT)
+                self.set_current_from_power("charge", charge_power)  # Write previous current setting to inverter
+                self.base.log(f"Current SOC {self.soc_percent}% is less than Target SOC {current_charge_limit}. Grid Charge enabled, amp rate written to inverter.")
             self.base.log(
                 f"Current SOC {self.soc_percent}% is less than Target SOC {current_charge_limit}. Grid charging enabled with charge current set to {self.base.get_arg('timed_charge_current', index=self.id, default=65):0.2f}"
             )
@@ -5164,9 +5170,10 @@ class PredBat(hass.Hass):
 
         self.dashboard_item(
             self.prefix + ".status",
-            state=message + extra,
+            state=message,
             attributes={
                 "friendly_name": "Status",
+                "detail": extra,
                 "icon": "mdi:information",
                 "last_updated": datetime.now(),
                 "debug": debug,
@@ -10457,7 +10464,7 @@ class PredBat(hass.Hass):
                                 disabled_charge_window = True
                             else:
                                 status = "Charging"
-                            status_extra = " target {}%".format(self.charge_limit_percent_best[0])
+                            status_extra = " target {}%-{}%".format(inverter.soc_percent, self.charge_limit_percent_best[0])
                         inverter.adjust_charge_immediate(self.charge_limit_percent_best[0])
                         isCharging = True
 
@@ -10536,7 +10543,7 @@ class PredBat(hass.Hass):
                             inverter.adjust_reserve(self.discharge_limits_best[0])
                             setReserve = True
                         status = "Discharging"
-                        status_extra = " target {}%".format(self.discharge_limits_best[0])
+                        status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
                         if self.set_discharge_freeze:
                             # In discharge freeze mode we disable charging during discharge slots
                             inverter.adjust_charge_rate(0)
@@ -10549,10 +10556,10 @@ class PredBat(hass.Hass):
                             inverter.adjust_charge_rate(0)
                             self.log("Discharge Freeze as discharge is now at/below target - current SOC {} and target {}".format(self.soc_kw, discharge_soc))
                             status = "Freeze discharging"
-                            status_extra = " target {}%".format(self.discharge_limits_best[0])
+                            status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
                         else:
                             status = "Hold discharging"
-                            status_extra = " target {}%".format(self.discharge_limits_best[0])
+                            status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
                             self.log(
                                 "Discharge Hold (ECO mode) as discharge is now at/below target or freeze only is set - current SOC {} and target {}".format(
                                     self.soc_kw, discharge_soc
@@ -12248,6 +12255,19 @@ class PredBat(hass.Hass):
         else:
             self.log("Failed to write predbat dashboard as can not find config root in {}".format(CONFIG_ROOTS))
 
+    def load_previous_value_from_ha(self, entity):
+        """
+        Load HA value either from state or from history if there is any
+        """
+        ha_value = self.get_state(entity)
+        if ha_value is not None:
+            return ha_value
+        history = self.get_history_async(entity_id=entity)
+        if history:
+            history = history[0]
+            ha_value = history[-1]["state"]
+        return ha_value
+
     def load_user_config(self, quiet=True, register=False):
         """
         Load config from HA
@@ -12256,7 +12276,7 @@ class PredBat(hass.Hass):
 
         # New install, used to set default of expert mode
         new_install = True
-        current_status = self.get_state("predbat.status")
+        current_status = self.load_previous_value_from_ha("predbat.status")
         if current_status:
             new_install = False
 
@@ -12290,7 +12310,7 @@ class PredBat(hass.Hass):
                 continue
 
             # Get from current state?
-            ha_value = self.get_state(entity)
+            ha_value = self.load_previous_value_from_ha(entity)
 
             # Update drop down menu
             if name == "update":
@@ -12300,13 +12320,6 @@ class PredBat(hass.Hass):
                 else:
                     # Leave current value until it's set during version discovery later
                     continue
-
-            # Get from history?
-            if ha_value is None:
-                history = self.get_history_async(entity_id=entity)
-                if history:
-                    history = history[0]
-                    ha_value = history[-1]["state"]
 
             # Default?
             if ha_value is None:
