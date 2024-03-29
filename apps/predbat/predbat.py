@@ -26,7 +26,7 @@ from multiprocessing import Pool, cpu_count
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.16.8"
+THIS_VERSION = "v7.16.10"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -464,6 +464,17 @@ CONFIG_ITEMS = [
         "friendly_name": "Car Charging Plan Smart",
         "type": "switch",
         "default": False,
+    },
+    {
+        "name": "car_charging_plan_max_price",
+        "friendly_name": "Car Charging Plan max price",
+        "type": "input_number",
+        "min": 0,
+        "max": 99,
+        "step": 1,
+        "unit": "p",
+        "icon": "mdi:ev-station",
+        "default": 0,
     },
     {
         "name": "car_charging_from_battery",
@@ -1027,12 +1038,17 @@ INVERTER_DEF = {
 SOLAX_SOLIS_MODES = {
     "Selfuse - No Grid Charging": 1,
     "Timed Charge/Discharge - No Grid Charging": 3,
+    "Backup/Reserve - No Grid Charging": 17,
     "Selfuse": 33,
     "Timed Charge/Discharge": 35,
     "Off-Grid Mode": 37,
     "Battery Awaken": 41,
     "Battery Awaken + Timed Charge/Discharge": 43,
+    "Backup/Reserve - No Timed Charge/Discharge": 49,
     "Backup/Reserve": 51,
+    "Feed-in priority - No Grid Charging": 64,
+    "Feed-in priority - No Timed Charge/Discharge": 96,
+    "Feed-in priority": 98,
 }
 
 
@@ -2076,9 +2092,14 @@ class Inverter:
                         self.base.log("WARN: REST data reports Battery Capacity kWh as {} but nominal indicates {} - using nominal".format(self.soc_max, self.nominal_capacity))
                     self.soc_max = self.nominal_capacity
                 soc_force_adjust = self.rest_data["raw"]["invertor"]["soc_force_adjust"]
-                if soc_force_adjust and soc_force_adjust != "0" and soc_force_adjust != "7":
-                    self.in_calibration = True
-                    self.log("WARN: Inverter is in calibration mode, Predbat will not function correctly and will be disabled")
+                if soc_force_adjust:
+                    try:
+                        soc_force_adjust = int(soc_force_adjust)
+                    except ValueError:
+                        soc_force_adjust = 0
+                    if (soc_force_adjust > 0) and (soc_force_adjust < 7):
+                        self.in_calibration = True
+                        self.log("WARN: Inverter is in calibration mode {}, Predbat will not function correctly and will be disabled".format(soc_force_adjust))
             self.soc_max *= self.battery_scaling
 
             # Max battery rate
@@ -2792,16 +2813,16 @@ class Inverter:
         charge_power = self.base.get_arg("charge_rate", index=self.id, default=2600.0)
         if self.soc_percent > float(current_charge_limit):
             # If current SOC is above Target SOC, turn Grid Charging off
-            self.alt_charge_discharge_enable("charge", False, grid=True, timed=False)
+            self.alt_charge_discharge_enable("charge", False, grid=True, timed=True)
             self.base.log(f"Current SOC {self.soc_percent}% is greater than Target SOC {current_charge_limit}. Grid Charge disabled.")
         elif self.soc_percent == float(current_charge_limit):  # If SOC target is reached
-            self.alt_charge_discharge_enable("charge", True, grid=True, timed=False)  # Make sure charging is on
+            self.alt_charge_discharge_enable("charge", True, grid=True, timed=True)  # Make sure charging is on
             if self.inv_output_charge_control == "current":
                 self.set_current_from_power("charge", (0))  # Set charge current to zero (i.e hold SOC)
                 self.base.log(f"Current SOC {self.soc_percent}% is same as Target SOC {current_charge_limit}. Grid Charge enabled, Amps rate set to 0.")
         else:
             # If we drop below the target, turn grid charging back on and make sure the charge current is correct
-            self.alt_charge_discharge_enable("charge", True, grid=True, timed=False)
+            self.alt_charge_discharge_enable("charge", True, grid=True, timed=True)
             if self.inv_output_charge_control == "current":
                 self.set_current_from_power("charge", charge_power)  # Write previous current setting to inverter
                 self.base.log(f"Current SOC {self.soc_percent}% is less than Target SOC {current_charge_limit}. Grid Charge enabled, amp rate written to inverter.")
@@ -2898,9 +2919,10 @@ class Inverter:
                 if self.rest_data:
                     self.rest_setChargeRate(new_rate)
                 else:
-                    entity = self.base.get_entity(self.base.get_arg("charge_rate", indirect=False, index=self.id))
-                    # Write
-                    self.write_and_poll_value("charge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_charge * MINUTE_WATT / 12))
+                    if "charge_rate" in self.base.args:
+                        entity = self.base.get_entity(self.base.get_arg("charge_rate", indirect=False, index=self.id))
+                        self.write_and_poll_value("charge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_charge * MINUTE_WATT / 12))
+
                     if self.inv_output_charge_control == "current":
                         self.set_current_from_power("charge", new_rate)
 
@@ -2945,8 +2967,9 @@ class Inverter:
                 if self.rest_data:
                     self.rest_setDischargeRate(new_rate)
                 else:
-                    entity = self.base.get_entity(self.base.get_arg("discharge_rate", indirect=False, index=self.id))
-                    self.write_and_poll_value("discharge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_discharge * MINUTE_WATT / 25))
+                    if "discharge_rate" in self.base.args:
+                        entity = self.base.get_entity(self.base.get_arg("discharge_rate", indirect=False, index=self.id))
+                        self.write_and_poll_value("discharge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_discharge * MINUTE_WATT / 25))
 
                     if self.inv_output_charge_control == "current":
                         self.set_current_from_power("discharge", new_rate)
@@ -3393,10 +3416,10 @@ class Inverter:
                     new_switch = switch & ~mask
 
                 if new_switch != switch:
-                    self.base.log(f"Setting Solis Energy Control Switch to {new_switch} from {switch} to {str_enable} {str_type} charging")
                     # Now lookup the new mode in an inverted dict:
                     new_mode = {SOLAX_SOLIS_MODES[x]: x for x in SOLAX_SOLIS_MODES}[new_switch]
 
+                    self.base.log(f"Setting Solis Energy Control Switch to {new_switch} {new_mode} from {switch} to {str_enable} {str_type} charging")
                     self.write_and_poll_option(name=entity_id, entity=entity, new_value=new_mode)
                     return True
                 else:
@@ -6402,6 +6425,7 @@ class PredBat(hass.Hass):
         """
         plan = []
         car_soc = self.car_charging_soc[car_n]
+        max_price = self.car_charging_plan_max_price[car_n]
 
         if self.car_charging_plan_smart[car_n]:
             price_sorted = self.sort_window_by_price(low_rates)
@@ -6448,15 +6472,23 @@ class PredBat(hass.Hass):
 
             start = max(window["start"], self.minutes_now)
             end = min(window["end"], ready_minutes)
+            price = window["average"]
             length = 0
             kwh = 0
 
+            # Stop once we have enough charge
             if car_soc >= self.car_charging_limit[car_n]:
                 break
 
+            # Skip past windows
             if end <= start:
                 continue
 
+            # Skip over prices when they are too high
+            if max_price > 0 and price > max_price:
+                continue
+
+            # Compute amount of charge
             length = end - start
             hours = length / 60
             kwh = self.car_charging_rate[car_n] * hours
@@ -7235,7 +7267,7 @@ class PredBat(hass.Hass):
         plan_debug = self.get_arg("plan_debug")
         html = "<table>"
         html += "<tr>"
-        html += "<td colspan=10> last updated: {} </td>".format(self.now_utc.strftime("%Y-%m-%d %H:%M:%S"))
+        html += "<td colspan=10> last updated: {} version: {}</td>".format(self.now_utc.strftime("%Y-%m-%d %H:%M:%S"), THIS_VERSION)
         html += "</tr>"
         html += self.get_html_plan_header(plan_debug)
         minute_now_align = int(self.minutes_now / 30) * 30
@@ -7244,8 +7276,10 @@ class PredBat(hass.Hass):
         in_span = False
         start_span = False
         for minute in range(minute_now_align, end_plan, 30):
-            minute_relative = max(minute - self.minutes_now, 0)
+            minute_relative = minute - self.minutes_now
+            minute_relative_start = max(minute_relative, 0)
             minute_relative_end = minute_relative + 30
+            minute_relative_slot_end = minute_relative_end
             minute_timestamp = self.midnight_utc + timedelta(minutes=minute)
             rate_start = minute_timestamp
             rate_value_import = self.dp2(self.rate_import.get(minute, 0))
@@ -7305,16 +7339,16 @@ class PredBat(hass.Hass):
             pv_forecast = self.dp2(pv_forecast)
             load_forecast = self.dp2(load_forecast)
 
-            soc_percent = int(self.dp2((self.predict_soc_best.get(minute_relative, 0.0) / self.soc_max) * 100.0) + 0.5)
-            soc_percent_end = int(self.dp2((self.predict_soc_best.get(minute_relative + 30, 0.0) / self.soc_max) * 100.0) + 0.5)
+            soc_percent = int(self.dp2((self.predict_soc_best.get(minute_relative_start, 0.0) / self.soc_max) * 100.0) + 0.5)
+            soc_percent_end = int(self.dp2((self.predict_soc_best.get(minute_relative_slot_end, 0.0) / self.soc_max) * 100.0) + 0.5)
             soc_percent_end_window = int(self.dp2((self.predict_soc_best.get(minute_relative_end, 0.0) / self.soc_max) * 100.0) + 0.5)
             soc_percent_max = max(soc_percent, soc_percent_end)
             soc_percent_min = min(soc_percent, soc_percent_end)
             soc_percent_max_window = max(soc_percent, soc_percent_end_window)
             soc_percent_min_window = min(soc_percent, soc_percent_end_window)
-            soc_change = self.predict_soc_best.get(minute_relative + 30, 0.0) - self.predict_soc_best.get(minute_relative, 0.0)
-            metric_start = self.predict_metric_best.get(minute_relative, 0.0)
-            metric_end = self.predict_metric_best.get(minute_relative + 30, metric_start)
+            soc_change = self.predict_soc_best.get(minute_relative_slot_end, 0.0) - self.predict_soc_best.get(minute_relative_start, 0.0)
+            metric_start = self.predict_metric_best.get(minute_relative_start, 0.0)
+            metric_end = self.predict_metric_best.get(minute_relative_slot_end, metric_start)
             metric_change = metric_end - metric_start
 
             soc_sym = ""
@@ -7485,8 +7519,8 @@ class PredBat(hass.Hass):
             iboost_amount_str = ""
             iboost_color = "#FFFFFF"
             if self.iboost_enable:
-                iboost_amount = self.predict_iboost_best.get(minute_relative, 0)
-                iboost_change = self.predict_iboost_best.get(minute_relative + 30, 0) - iboost_amount
+                iboost_amount = self.predict_iboost_best.get(minute_relative_start, 0)
+                iboost_change = self.predict_iboost_best.get(minute_relative_slot_end, 0) - iboost_amount
                 iboost_amount_str = str(self.dp2(iboost_amount))
                 if iboost_change > 0:
                     iboost_color = "#FFFF00"
@@ -9666,6 +9700,7 @@ class PredBat(hass.Hass):
         self.car_charging_planned = [False for c in range(self.num_cars)]
         self.car_charging_now = [False for c in range(self.num_cars)]
         self.car_charging_plan_smart = [False for c in range(self.num_cars)]
+        self.car_charging_plan_max_price = [False for c in range(self.num_cars)]
         self.car_charging_plan_time = [False for c in range(self.num_cars)]
         self.car_charging_battery_size = [100.0 for c in range(self.num_cars)]
         self.car_charging_limit = [100.0 for c in range(self.num_cars)]
@@ -9702,6 +9737,7 @@ class PredBat(hass.Hass):
 
             # Other car related configuration
             self.car_charging_plan_smart[car_n] = self.get_arg("car_charging_plan_smart", False)
+            self.car_charging_plan_max_price[car_n] = self.get_arg("car_charging_plan_max_price", 0.0)
             self.car_charging_plan_time[car_n] = self.get_arg("car_charging_plan_time", "07:00:00")
             self.car_charging_battery_size[car_n] = float(self.get_arg("car_charging_battery_size", 100.0, index=car_n))
             self.car_charging_rate[car_n] = float(self.get_arg("car_charging_rate"))
@@ -9709,12 +9745,13 @@ class PredBat(hass.Hass):
 
         if self.num_cars > 0:
             self.log(
-                "Cars {} charging from battery {} planned {}, charging_now {} smart {}, plan_time {}, battery size {}, limit {}, rate {}".format(
+                "Cars {} charging from battery {} planned {}, charging_now {} smart {}, max_price {}, plan_time {}, battery size {}, limit {}, rate {}".format(
                     self.num_cars,
                     self.car_charging_from_battery,
                     self.car_charging_planned,
                     self.car_charging_now,
                     self.car_charging_plan_smart,
+                    self.car_charging_plan_max_price,
                     self.car_charging_plan_time,
                     self.car_charging_battery_size,
                     self.car_charging_limit,
@@ -12384,7 +12421,7 @@ class PredBat(hass.Hass):
             watch_list = self.get_arg("watch_list", [], indirect=False)
             self.log("Watch list {}".format(watch_list))
             for entity in watch_list:
-                if entity:
+                if entity and isinstance(entity, str) and ("." in entity):
                     self.listen_state(self.watch_event, entity_id=entity)
 
     def resolve_arg_re(self, arg, arg_value, state_keys):
