@@ -1093,9 +1093,6 @@ INVERTER_DEF = {
         "has_idle_time": False,
         "can_span_midnight": True,
     },
-
-    },
-
 }
 
 # Control modes for Solax inverters
