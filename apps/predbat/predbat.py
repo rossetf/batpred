@@ -1068,7 +1068,7 @@ INVERTER_DEF = {
         "has_idle_time": False,
         "can_span_midnight": True,
     },
-    "LP": {
+     "LP": {
         "name": "LuxPower",
         "has_rest_api": False,
         "has_mqtt_api": False,
@@ -1078,7 +1078,8 @@ INVERTER_DEF = {
         "has_service_api": False,
         "has_target_soc": True,
         "has_reserve_soc": False,
-        "charge_time_format": "H M",
+        #"charge_time_format": "H M",
+        "charge_time_format": "HH:MM:SS",
         "charge_time_entity_is_option": False,
         #"soc_units": "kWh",
         "soc_units": "%",
@@ -1093,6 +1094,7 @@ INVERTER_DEF = {
         "has_idle_time": False,
         "can_span_midnight": True,
     },
+
 }
 
 # Control modes for Solax inverters
