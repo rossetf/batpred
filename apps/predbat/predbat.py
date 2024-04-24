@@ -1094,7 +1094,7 @@ INVERTER_DEF = {
         "has_idle_time": False,
         "can_span_midnight": True,
     },
-     "LP": {
+  "LP": {
         "name": "LuxPower",
         "has_rest_api": False,
         "has_mqtt_api": False,
@@ -1120,6 +1120,7 @@ INVERTER_DEF = {
         "has_idle_time": False,
         "can_span_midnight": True,
     },
+
 
 }
 
