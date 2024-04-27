@@ -27,7 +27,7 @@ from multiprocessing import Pool, cpu_count
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.17.3"
+THIS_VERSION = "v7.17.5"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -741,6 +741,26 @@ CONFIG_ITEMS = [
         "manual": True,
     },
     {
+        "name": "manual_freeze_charge",
+        "friendly_name": "Manual force charge freeze",
+        "type": "select",
+        "options": [],
+        "icon": "mdi:state-machine",
+        "default": "",
+        "restore": False,
+        "manual": True,
+    },
+    {
+        "name": "manual_freeze_discharge",
+        "friendly_name": "Manual force discharge freeze",
+        "type": "select",
+        "options": [],
+        "icon": "mdi:state-machine",
+        "default": "",
+        "restore": False,
+        "manual": True,
+    },
+    {
         "name": "saverestore",
         "friendly_name": "Save/restore settings",
         "type": "select",
@@ -764,7 +784,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_enable",
-        "friendly_name": "IBoost enable",
+        "friendly_name": "iBoost enable",
         "type": "switch",
         "default": False,
     },
@@ -776,25 +796,25 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_solar",
-        "friendly_name": "IBoost on solar power",
+        "friendly_name": "iBoost on solar power",
         "type": "switch",
         "default": True,
     },
     {
         "name": "iboost_gas",
-        "friendly_name": "IBoost when cheaper than gas",
+        "friendly_name": "iBoost when electricity cheaper than gas",
         "type": "switch",
         "default": False,
     },
     {
         "name": "iboost_charging",
-        "friendly_name": "IBoost when battery charging",
+        "friendly_name": "iBoost when battery charging",
         "type": "switch",
         "default": False,
     },
     {
         "name": "iboost_gas_scale",
-        "friendly_name": "IBoost gas price scaling",
+        "friendly_name": "iBoost gas price scaling",
         "type": "input_number",
         "min": 0,
         "max": 2.0,
@@ -806,7 +826,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_max_energy",
-        "friendly_name": "IBoost max energy",
+        "friendly_name": "iBoost max energy",
         "type": "input_number",
         "min": 0,
         "max": 20,
@@ -817,7 +837,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_today",
-        "friendly_name": "IBoost today",
+        "friendly_name": "iBoost today",
         "type": "input_number",
         "min": 0,
         "max": 5,
@@ -828,7 +848,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_max_power",
-        "friendly_name": "IBoost max power",
+        "friendly_name": "iBoost max power",
         "type": "input_number",
         "min": 0,
         "max": 3500,
@@ -840,7 +860,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_min_power",
-        "friendly_name": "IBoost min power",
+        "friendly_name": "iBoost min power",
         "type": "input_number",
         "min": 0,
         "max": 3500,
@@ -851,7 +871,7 @@ CONFIG_ITEMS = [
     },
     {
         "name": "iboost_min_soc",
-        "friendly_name": "IBoost min soc",
+        "friendly_name": "iBoost min soc",
         "type": "input_number",
         "min": 0,
         "max": 100,
@@ -912,6 +932,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": True,
         "has_reserve_soc": True,
+        "has_timed_pause": True,
         "charge_time_format": "HH:MM:SS",
         "charge_time_entity_is_option": True,
         "soc_units": "kWh",
@@ -936,6 +957,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": True,
         "has_target_soc": True,
         "has_reserve_soc": True,
+        "has_timed_pause": True,
         "charge_time_format": "HH:MM:SS",
         "charge_time_entity_is_option": True,
         "soc_units": "kWh",
@@ -960,6 +982,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": True,
         "has_reserve_soc": True,
+        "has_timed_pause": False,
         "charge_time_format": "HH:MM:SS",
         "charge_time_entity_is_option": True,
         "soc_units": "kWh",
@@ -984,6 +1007,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": False,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
         "charge_time_format": "H M",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -1008,6 +1032,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": False,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
         "charge_time_format": "S",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -1032,6 +1057,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": False,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
         "charge_time_format": "S",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -1056,6 +1082,7 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": False,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
         "charge_time_format": "S",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -1080,6 +1107,32 @@ INVERTER_DEF = {
         "has_discharge_enable_time": False,
         "has_target_soc": False,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
+        "charge_time_format": "S",
+        "charge_time_entity_is_option": False,
+        "soc_units": "%",
+        "num_load_entities": 1,
+        "has_ge_inverter_mode": False,
+        "time_button_press": False,
+        "clock_time_format": "%Y-%m-%d %H:%M:%S",
+        "write_and_poll_sleep": 2,
+        "has_time_window": False,
+        "support_charge_freeze": False,
+        "support_discharge_freeze": False,
+        "has_idle_time": False,
+        "can_span_midnight": True,
+    },
+    "SK": {
+        "name": "Sunsynk",
+        "has_rest_api": False,
+        "has_mqtt_api": False,
+        "has_service_api": True,
+        "output_charge_control": "power",
+        "has_charge_enable_time": False,
+        "has_discharge_enable_time": False,
+        "has_target_soc": True,
+        "has_reserve_soc": False,
+        "has_timed_pause": False,
         "charge_time_format": "S",
         "charge_time_entity_is_option": False,
         "soc_units": "%",
@@ -1702,13 +1755,13 @@ class Prediction:
             if not self.car_charging_from_battery and not car_freeze:
                 discharge_rate_now = self.battery_rate_max_discharge
 
-            # IBoost on load, don't do on discharge
+            # IBoost solar diverter on load, don't do on discharge
             iboost_amount = 0
             if self.iboost_enable and (discharge_window_n < 0):
                 if iboost_today_kwh < self.iboost_max_energy:
                     if self.iboost_gas:
                         if rate_gas:
-                            # Iboost on cheap electric rates
+                            # iBoost on cheap electric rates
                             gas_rate = rate_gas.get(minute_absolute, 99) * self.iboost_gas_scale
                             electric_rate = rate_import.get(minute_absolute, 0)
                             if (electric_rate < gas_rate) and (charge_window_n >= 0 or not self.iboost_charging):
@@ -1734,7 +1787,7 @@ class Prediction:
             pv_ac *= self.inverter_loss
             pv_dc *= self.inverter_loss
 
-            # IBoost model
+            # iBoost solar diverter model
             if self.iboost_enable:
                 if iboost_today_kwh < self.iboost_max_energy and (
                     self.iboost_solar and pv_dc > (self.iboost_min_power * step) and ((soc * 100.0 / self.soc_max) >= self.iboost_min_soc)
@@ -1745,11 +1798,11 @@ class Prediction:
                 # Cumulative energy
                 iboost_today_kwh += iboost_amount
 
-                # Model Iboost reset
+                # Model iboost reset
                 if (minute_absolute % (24 * 60)) == ((24 * 60) - step):
                     iboost_today_kwh = 0
 
-                # Save Iboost next prediction
+                # Save iBoost next prediction
                 if minute == 0 and save == "best":
                     scaled_boost = (iboost_amount / step) * RUN_EVERY
                     self.iboost_next = round(self.iboost_today + scaled_boost, 3)
@@ -2145,6 +2198,8 @@ class Inverter:
                     self.base.call_notify("Auto-restart service {} called due to: {}".format(service, reason))
                     time.sleep(15)
             raise Exception("Auto-restart triggered")
+        else:
+            self.log("INFO: auto_restart not defined in apps.yaml, Predbat can't auto-restart inverter control")
 
     def __init__(self, base, id=0, quiet=False):
         self.id = id
@@ -2215,6 +2270,7 @@ class Inverter:
         self.inv_has_discharge_enable_time = INVERTER_DEF[self.inverter_type]["has_discharge_enable_time"]
         self.inv_has_target_soc = INVERTER_DEF[self.inverter_type]["has_target_soc"]
         self.inv_has_reserve_soc = INVERTER_DEF[self.inverter_type]["has_reserve_soc"]
+        self.inv_has_timed_pause = INVERTER_DEF[self.inverter_type]["has_timed_pause"]
         self.inv_charge_time_format = INVERTER_DEF[self.inverter_type]["charge_time_format"]
         self.inv_charge_time_entity_is_option = INVERTER_DEF[self.inverter_type]["charge_time_entity_is_option"]
         self.inv_clock_time_format = INVERTER_DEF[self.inverter_type]["clock_time_format"]
@@ -2604,7 +2660,7 @@ class Inverter:
                     # Average the data points
                     for index in final_curve:
                         if final_curve_count[index] > 0:
-                            final_curve[index] = final_curve[index] / final_curve_count[index]
+                            final_curve[index] = self.base.dp2(final_curve[index] / final_curve_count[index])
 
                     self.log("Curve before adjustment is: {}".format(final_curve))
 
@@ -2647,7 +2703,7 @@ class Inverter:
                         # If we have the correct data then output it
                         if rate_scaling > 0:
                             if discharge:
-                                text = "  battery_charge_power_curve_discharge:\n"
+                                text = "  battery_discharge_power_curve:\n"
                             else:
                                 text = "  battery_charge_power_curve:\n"
                             keys = sorted(final_curve.keys())
@@ -3335,6 +3391,77 @@ class Inverter:
         self.base.log("WARN: Inverter {} Trying to write {} to {} didn't complete got {}".format(self.id, name, new_value, entity.get_state()))
         self.base.record_status("Warn - Inverter {} write to {} failed".format(self.id, name), had_errors=True)
         return False
+
+    def adjust_pause_mode(self, pause_charge=False, pause_discharge=False):
+        """
+        Inverter control for Pause mode
+        """
+
+        entity_mode = self.base.get_arg("pause_mode", indirect=False, index=self.id)
+        entity_start = self.base.get_arg("pause_start_time", indirect=False, index=self.id)
+        entity_end = self.base.get_arg("pause_end_time", indirect=False, index=self.id)
+        old_pause_mode = None
+        old_start_time = None
+        old_end_time = None
+
+        # As not all inverters have these options we need to gracefully give up if its missing
+        if entity_mode:
+            old_pause_mode = self.base.get_state(entity_mode)
+            if old_pause_mode is not None:
+                entity_mode = self.base.get_entity(entity_mode)
+            else:
+                entity_mode = None
+
+        if entity_start:
+            old_start_time = self.base.get_state(entity_start)
+            if old_start_time is not None:
+                entity_start = self.base.get_entity(entity_start)
+            else:
+                entity_start = None
+                self.log("Note: Inverter {} does not have pause_start_time entity".format(self.id))
+
+        if entity_end:
+            old_end_time = self.base.get_state(entity_end)
+            if old_end_time is not None:
+                entity_end = self.base.get_entity(entity_end)
+            else:
+                self.log("Note: Inverter {} does not have pause_end_time entity".format(self.id))
+                entity_end = None
+
+        if not entity_mode or not self.inv_has_timed_pause:
+            self.log("Note: Inverter {} does not have pause_mode entity configured".format(self.id))
+            return
+
+        # Some inverters have start/end time registers
+        new_start_time = "00:00:00"
+        new_end_time = "23:59:00"
+
+        if pause_charge and pause_discharge:
+            new_pause_mode = "PauseBoth"
+        elif pause_charge:
+            new_pause_mode = "PauseCharge"
+        elif pause_discharge:
+            new_pause_mode = "PauseDischarge"
+        else:
+            new_pause_mode = "Disabled"
+
+        if old_start_time and old_start_time != new_start_time:
+            # Don't poll as inverters with no registers will fail
+            entity_start.set_state(state=new_start_time)
+            self.base.log("Inverter {} set pause start time to {}".format(self.id, new_start_time))
+        if old_end_time and old_end_time != new_end_time:
+            # Don't poll as inverters with no registers will fail
+            entity_end.set_state(state=new_end_time)
+            self.base.log("Inverter {} set pause end time to {}".format(self.id, new_end_time))
+
+        # Set the mode
+        if new_pause_mode != old_pause_mode:
+            self.write_and_poll_option("inverter_mode", entity_mode, new_pause_mode)
+
+            if self.base.set_inverter_notify:
+                self.base.call_notify("Predbat: Inverter {} pause mode to set {} at time {}".format(self.id, new_pause_mode, self.base.time_now_str()))
+
+            self.base.log("Inverter {} set pause mode to {}".format(self.id, new_pause_mode))
 
     def adjust_inverter_mode(self, force_discharge, changed_start_end=False):
         """
@@ -6185,7 +6312,7 @@ class PredBat(hass.Hass):
                     )
                     self.dashboard_item(
                         self.prefix + ".carbon_now",
-                        state=self.dp2(self.carbon_intensity.get(0)),
+                        state=self.dp2(self.carbon_intensity.get(0, 0)),
                         attributes={
                             "friendly_name": "Grid carbon intensity now",
                             "state_class": "measurement",
@@ -6390,7 +6517,7 @@ class PredBat(hass.Hass):
                     state=self.dp2(final_iboost_kwh),
                     attributes={
                         "results": predict_iboost,
-                        "friendly_name": "Predicted IBoost energy best",
+                        "friendly_name": "Predicted iBoost energy best",
                         "state_class": "measurement",
                         "unit_of_measurement": "kWh",
                         "icon": "mdi:water-boiler",
@@ -6399,7 +6526,7 @@ class PredBat(hass.Hass):
                 self.dashboard_item(
                     "binary_sensor." + self.prefix + "_iboost_active" + postfix,
                     state=self.iboost_running,
-                    attributes={"friendly_name": "IBoost active", "icon": "mdi:water-boiler"},
+                    attributes={"friendly_name": "iBoost active", "icon": "mdi:water-boiler"},
                 )
                 self.find_spare_energy(self.predict_soc, predict_export, step, first_charge)
                 if self.carbon_enable:
@@ -7992,7 +8119,10 @@ class PredBat(hass.Hass):
                     else:
                         state = "Chrg&nearr;"
                         state_color = "#3AEE85"
+
                     if self.charge_window_best[charge_window_n]["start"] in self.manual_charge_times:
+                        state += " &#8526;"
+                    elif self.charge_window_best[charge_window_n]["start"] in self.manual_freeze_charge_times:
                         state += " &#8526;"
                     show_limit = str(limit_percent)
 
@@ -8017,7 +8147,10 @@ class PredBat(hass.Hass):
                         state_color = "#FFFF00"
                     state += "Dis&searr;"
                     show_limit = str(int(limit))
+
                 if self.discharge_window_best[discharge_window_n]["start"] in self.manual_discharge_times:
+                    state += " &#8526;"
+                elif self.discharge_window_best[discharge_window_n]["start"] in self.manual_freeze_discharge_times:
                     state += " &#8526;"
 
             # Import and export rates -> to string
@@ -8047,8 +8180,13 @@ class PredBat(hass.Hass):
             if discharge_window_n >= 0:
                 rate_str_export = "<b>" + rate_str_export + "</b>"
 
-            # Cost
-            total_str = self.currency_symbols[0] + "%02.02f" % (metric_start / 100.0)
+            # Total cost at start of slot, add leading minus if negative
+            if metric_start >= 0:
+                total_str = self.currency_symbols[0] + "%02.02f" % (metric_start / 100.0)
+            else:
+                total_str = "-" + self.currency_symbols[0] + "%02.02f" % (abs(metric_start) / 100.0)
+
+            # Cost predicted for this slot
             if metric_change >= 10.0:
                 cost_str = "+%d %s " % (int(metric_change), self.currency_symbols[1])
                 cost_str += " &nearr;"
@@ -8085,7 +8223,7 @@ class PredBat(hass.Hass):
                     car_charging_str = ""
                     car_color = "#FFFFFF"
 
-            # IBoost
+            # iBoost
             iboost_amount_str = ""
             iboost_color = "#FFFFFF"
             if self.iboost_enable:
@@ -8706,6 +8844,8 @@ class PredBat(hass.Hass):
         self.inverter_needs_reset_force = ""
         self.manual_charge_times = []
         self.manual_discharge_times = []
+        self.manual_freeze_charge_times = []
+        self.manual_freeze_discharge_times = []
         self.manual_idle_times = []
         self.manual_all_times = []
         self.config_index = {}
@@ -8883,21 +9023,28 @@ class PredBat(hass.Hass):
         region_end=None,
         fast=False,
         quiet=False,
+        best_metric=9999999,
+        best_cost=0,
+        best_keep=0,
+        best_soc_min=None,
+        best_price_charge=None,
+        best_price_discharge=None,
     ):
         """
         Pick an import price threshold which gives the best results
         """
         loop_price = price_set[-1]
         best_price = loop_price
-        best_metric = 9999999
-        best_keep = 0
         try_discharge = discharge_limits.copy()
         best_limits = try_charge_limit.copy()
         best_discharge = try_discharge.copy()
-        best_soc_min = self.reserve
         best_cost = 0
-        best_price_charge = price_set[-1]
-        best_price_discharge = price_set[0]
+        if best_soc_min is None:
+            best_soc_min = self.reserve
+        if best_price_charge is None:
+            best_price_charge = price_set[-1]
+        if best_price_discharge is None:
+            best_price_discharge = price_set[0]
         tried_list = {}
         step = PREDICT_STEP
         if fast:
@@ -9078,7 +9225,7 @@ class PredBat(hass.Hass):
                             best_discharge = try_discharge.copy()
                             best_soc_min = soc_min
                             best_cost = cost
-                            if not quiet:
+                            if 1 or not quiet:
                                 self.log(
                                     "Optimise all charge found best buy/sell price band {} best price threshold {} at metric {} keep {} cost {} limits {} discharge {}".format(
                                         loop_price, best_price_charge, self.dp4(best_metric), self.dp4(best_keep), self.dp4(best_cost), best_limits, best_discharge
@@ -9096,7 +9243,7 @@ class PredBat(hass.Hass):
                 best_discharge,
             )
         )
-        return best_limits, best_discharge, best_price_charge, best_price_discharge, best_metric, best_cost
+        return best_limits, best_discharge, best_price_charge, best_price_discharge, best_metric, best_cost, best_keep, best_soc_min
 
     def launch_run_prediction_charge(self, loop_soc, window_n, charge_limit, charge_window, discharge_window, discharge_limits, pv10, all_n, end_record):
         """
@@ -9129,9 +9276,169 @@ class PredBat(hass.Hass):
             )
         return han
 
-    def optimise_charge_limit(
-        self, window_n, record_charge_windows, charge_limit, charge_window, discharge_window, discharge_limits, all_n=None, end_record=None, freeze_only=False
-    ):
+    def optimise_charge_limit_swap(self, charge_limit, charge_window, discharge_window, discharge_limits, record_charge_windows, end_record=None):
+        """
+        Re-optimise charge limits by swapping to cheaper slots
+        """
+        charge_limit = copy.deepcopy(charge_limit)
+
+        (
+            cost10,
+            import_kwh_battery10,
+            import_kwh_house10,
+            export_kwh10,
+            soc_min10,
+            soc10,
+            soc_min_minute10,
+            battery_cycle10,
+            metric_keep10,
+            final_iboost10,
+            final_carbon_g10,
+        ) = self.run_prediction(
+            charge_limit,
+            charge_window,
+            discharge_window,
+            discharge_limits,
+            True,
+            end_record=self.end_record,
+        )
+        (
+            cost,
+            import_kwh_battery,
+            import_kwh_house,
+            export_kwh,
+            soc_min,
+            soc,
+            soc_min_minute,
+            battery_cycle,
+            metric_keep,
+            final_iboost,
+            final_carbon_g,
+        ) = self.run_prediction(
+            charge_limit,
+            charge_window,
+            discharge_window,
+            discharge_limits,
+            False,
+            end_record=self.end_record,
+        )
+        metric, metric10 = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, battery_cycle10, metric_keep, metric_keep10)
+
+        best_soc = soc
+        best_soc_min = soc_min
+        best_soc_min_minute = soc_min_minute
+        best_metric = metric
+        best_cost = cost
+        best_keep = metric_keep
+
+        price_sorted = self.sort_window_by_price(charge_window)
+        price_sorted.reverse()
+        # Windows listed in price order high to low
+
+        self.log("Starting swap optimisation with metric {}".format(metric))
+
+        for window_n in price_sorted:
+            price_n = charge_window[window_n]["average"]
+            limit_n = charge_limit[window_n]
+            if window_n < record_charge_windows and limit_n > 0:
+                for window_swap in price_sorted[window_n + 1 :]:
+                    price_swap = charge_window[window_swap]["average"]
+                    limit_swap = charge_limit[window_swap]
+                    if window_swap < record_charge_windows and price_swap <= price_n and limit_swap < limit_n:
+                        self.log(
+                            "Attempt charge window swap window {} price {} limit {} -> window {} price {} limit {}".format(
+                                window_n, price_n, limit_n, window_swap, price_swap, limit_swap
+                            )
+                        )
+                        try_limit = charge_limit.copy()
+                        try_value = try_limit[window_swap]
+                        try_limit[window_swap] = try_limit[window_n]
+                        try_limit[window_n] = try_value
+
+                        (
+                            cost10,
+                            import_kwh_battery10,
+                            import_kwh_house10,
+                            export_kwh10,
+                            soc_min10,
+                            soc10,
+                            soc_min_minute10,
+                            battery_cycle10,
+                            metric_keep10,
+                            final_iboost10,
+                            final_carbon_g10,
+                        ) = self.run_prediction(
+                            try_limit,
+                            charge_window,
+                            discharge_window,
+                            discharge_limits,
+                            True,
+                            end_record=self.end_record,
+                        )
+                        (
+                            cost,
+                            import_kwh_battery,
+                            import_kwh_house,
+                            export_kwh,
+                            soc_min,
+                            soc,
+                            soc_min_minute,
+                            battery_cycle,
+                            metric_keep,
+                            final_iboost,
+                            final_carbon_g,
+                        ) = self.run_prediction(
+                            try_limit,
+                            charge_window,
+                            discharge_window,
+                            discharge_limits,
+                            False,
+                            end_record=self.end_record,
+                        )
+                        metric, metric10 = self.compute_metric(
+                            end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, battery_cycle10, metric_keep, metric_keep10
+                        )
+
+                        self.log("Swap optimisation with metric {}".format(metric))
+                        if metric < best_metric:
+                            best_metric = metric
+                            best_cost = cost
+                            best_keep = metric_keep
+                            best_soc = soc
+                            best_soc_min = soc_min
+                            best_soc_min_minute = soc_min_minute
+                            charge_limit = try_limit.copy()
+                            self.log("Swap optimisation window {} -> {} selected with metric {}".format(window_n, window_swap, metric))
+        self.log("Swap optimisation finished with metric {}".format(best_metric))
+        return charge_limit, best_soc, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep
+
+    def compute_metric(self, end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, battery_cycle10, metric_keep, metric_keep10):
+        """
+        Compute the metric combing pv and pv10 data
+        """
+        # Store simulated mid value
+        metric = cost
+        metric10 = cost10
+
+        # Balancing payment to account for battery left over
+        # ie. how much extra battery is worth to us in future, assume it's the same as low rate
+        rate_min = self.rate_min_forward.get(end_record, self.rate_min) / self.inverter_loss / self.battery_loss
+        metric -= (soc + final_iboost) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
+        metric10 -= (soc10 + final_iboost10) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
+
+        # Metric adjustment based on 10% outcome weighting
+        if metric10 > metric:
+            metric_diff = metric10 - metric
+            metric_diff *= self.pv_metric10_weight
+            metric += metric_diff
+
+        # Adjustment for battery cycles metric
+        metric += battery_cycle * self.metric_battery_cycle + metric_keep
+        metric10 += battery_cycle10 * self.metric_battery_cycle + metric_keep10
+
+        return self.dp4(metric), self.dp4(metric10)
+
+    def optimise_charge_limit(self, window_n, record_charge_windows, charge_limit, charge_window, discharge_window, discharge_limits, all_n=None, end_record=None):
         """
         Optimise a single charging window for best SOC
         """
@@ -9265,26 +9572,27 @@ class PredBat(hass.Hass):
         if best_soc_min_setting > 0:
             best_soc_min_setting = max(self.reserve, best_soc_min_setting)
 
-        if freeze_only:
-            try_socs.append(charge_limit[window_n])
-        else:
-            while loop_soc > self.reserve:
+        while loop_soc > self.reserve:
+            skip = False
+            try_soc = max(best_soc_min, loop_soc)
+            try_soc = self.dp2(min(try_soc, self.soc_max))
+            if try_soc > (all_max_soc + loop_step):
+                skip = True
+            if (try_soc > self.reserve) and (try_soc > self.best_soc_min) and (try_soc < (all_min_soc - loop_step)):
+                skip = True
+            # Keep those we already simulated
+            if try_soc in resultmid:
                 skip = False
-                try_soc = max(best_soc_min, loop_soc)
-                try_soc = self.dp2(min(try_soc, self.soc_max))
-                if try_soc > (all_max_soc + loop_step):
-                    skip = True
-                if (try_soc > self.reserve) and (try_soc > self.best_soc_min) and (try_soc < (all_min_soc - loop_step)):
-                    skip = True
-                # Keep those we already simulated
-                if try_soc in resultmid:
-                    skip = False
-                if not skip and (try_soc not in try_socs) and (try_soc != self.reserve):
-                    try_socs.append(self.dp2(try_soc))
-                loop_soc -= loop_step
+            # Keep the current setting if different from the selected ones
+            if not all_n and try_soc == charge_limit[window_n]:
+                skip = False
+            # All to the list
+            if not skip and (try_soc not in try_socs) and (try_soc != self.reserve):
+                try_socs.append(self.dp2(try_soc))
+            loop_soc -= loop_step
 
         # Give priority to off to avoid spurious charge freezes
-        if not freeze_only and best_soc_min_setting not in try_socs:
+        if best_soc_min_setting not in try_socs:
             try_socs.append(best_soc_min_setting)
         if self.set_charge_freeze and (self.reserve not in try_socs):
             try_socs.append(self.reserve)
@@ -9321,7 +9629,7 @@ class PredBat(hass.Hass):
 
             # Simulate with medium PV
             (
-                metricmid,
+                cost,
                 import_kwh_battery,
                 import_kwh_house,
                 export_kwh,
@@ -9336,7 +9644,7 @@ class PredBat(hass.Hass):
                 max_soc,
             ) = resultmid[try_soc]
             (
-                metric10,
+                cost10,
                 import_kwh_battery,
                 import_kwh_house,
                 export_kwh,
@@ -9350,25 +9658,9 @@ class PredBat(hass.Hass):
                 min_soc,
                 max_soc,
             ) = result10[try_soc]
-            # Store simulated mid value
-            metric = metricmid
-            cost = metricmid
 
-            # Balancing payment to account for battery left over
-            # ie. how much extra battery is worth to us in future, assume it's the same as low rate
-            rate_min = self.rate_min_forward.get(end_record, self.rate_min) / self.inverter_loss / self.battery_loss
-            metric -= (soc + final_iboost) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
-            metric10 -= (soc10 + final_iboost10) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
-
-            # Metric adjustment based on 10% outcome weighting
-            if metric10 > metric:
-                metric_diff = metric10 - metric
-                metric_diff *= self.pv_metric10_weight
-                metric += metric_diff
-
-            # Adjustment for battery cycles metric
-            metric += battery_cycle * self.metric_battery_cycle + metric_keep
-            metric10 += battery_cycle10 * self.metric_battery_cycle + metric_keep10
+            # Compute the metric from simulation results
+            metric, metric10 = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, battery_cycle10, metric_keep, metric_keep10)
 
             # Metric adjustment based on current charge limit when inside the window
             # to try to avoid constant small changes to SOC target by forcing to keep the current % during a charge period
@@ -9389,7 +9681,6 @@ class PredBat(hass.Hass):
 
             # Round metric to 4 DP
             metric = self.dp4(metric)
-            metric10 = self.dp4(metric10)
 
             if self.debug_enable:
                 self.log(
@@ -9550,9 +9841,9 @@ class PredBat(hass.Hass):
             start, this_discharge_limit, hanres, hanres10 = try_option
 
             # Simulate with medium PV
-            metricmid, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = hanres
+            cost, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = hanres
             (
-                metric10,
+                cost10,
                 import_kwh_battery10,
                 import_kwh_house10,
                 export_kwh10,
@@ -9565,26 +9856,8 @@ class PredBat(hass.Hass):
                 final_carbon_g10,
             ) = hanres10
 
-            # Store simulated mid value
-            metric = metricmid
-            cost = metricmid
-
-            # Balancing payment to account for battery left over
-            # ie. how much extra battery is worth to us in future, assume it's the same as low rate
-            rate_min = self.rate_min_forward.get(end_record, self.rate_min) / self.inverter_loss / self.battery_loss
-            metric -= (soc + final_iboost) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
-            metric10 -= (soc10 + final_iboost10) * max(rate_min, 1.0, self.rate_export_min * self.inverter_loss * self.battery_loss_discharge) * self.metric_battery_value_scaling
-
-            # Metric adjustment based on 10% outcome weighting
-            if metric10 > metric:
-                metric_diff = metric10 - metric
-                metric_diff *= self.pv_metric10_weight
-                metric += metric_diff
-                metric = self.dp2(metric)
-
-            # Adjustment for battery cycles metric
-            metric += battery_cycle * self.metric_battery_cycle + metric_keep
-            metric10 += battery_cycle * self.metric_battery_cycle + metric_keep10
+            # Compute the metric from simulation results
+            metric, metric10 = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, battery_cycle10, metric_keep, metric_keep10)
 
             # Adjust to try to keep existing windows
             if window_n < 2 and this_discharge_limit <= 99.0 and self.discharge_window and self.isDischarging:
@@ -9602,7 +9875,7 @@ class PredBat(hass.Hass):
 
             if self.debug_enable:
                 self.log(
-                    "Sim: Discharge {} window {} start {} end {}, imp bat {} house {} exp {} min_soc {} @ {} soc {} cost {} metric {} metricmid {} metric10 {} cycle {} end_record {}".format(
+                    "Sim: Discharge {} window {} start {} end {}, imp bat {} house {} exp {} min_soc {} @ {} soc {} cost {} metric {} metric10 {} cycle {} end_record {}".format(
                         this_discharge_limit,
                         window_n,
                         self.time_abs_str(start),
@@ -9615,7 +9888,6 @@ class PredBat(hass.Hass):
                         self.dp4(soc),
                         self.dp4(cost),
                         self.dp4(metric),
-                        self.dp4(metricmid),
                         self.dp4(metric10),
                         self.dp4(battery_cycle * self.metric_battery_cycle),
                         end_record,
@@ -10132,7 +10404,7 @@ class PredBat(hass.Hass):
             self.log("Optimise all windows, total charge {} discharge {}".format(record_charge_windows, record_discharge_windows))
             self.optimise_charge_windows_reset(reset_all=True)
             self.optimise_charge_windows_manual()
-            self.charge_limit_best, ignore_discharge_limits, best_price, best_price_discharge, best_metric, best_cost = self.optimise_charge_limit_price(
+            self.charge_limit_best, ignore_discharge_limits, best_price, best_price_discharge, best_metric, best_cost, best_keep, best_soc_min = self.optimise_charge_limit_price(
                 price_set,
                 price_links,
                 window_index,
@@ -10152,7 +10424,16 @@ class PredBat(hass.Hass):
                     self.log(">> Region optimisation pass width {}".format(region_size))
                     for region in range(0, self.end_record, region_size):
                         region_end = min(region + region_size, self.end_record)
-                        self.charge_limit_best, ignore_discharge_limits, region_best_price, region_best_price_discharge, best_metric, best_cost = self.optimise_charge_limit_price(
+                        (
+                            self.charge_limit_best,
+                            ignore_discharge_limits2,
+                            best_price_region,
+                            best_price_discharge_region,
+                            best_metric,
+                            best_cost,
+                            best_keep,
+                            best_soc_min,
+                        ) = self.optimise_charge_limit_price(
                             price_set,
                             price_links,
                             window_index,
@@ -10160,12 +10441,18 @@ class PredBat(hass.Hass):
                             self.charge_limit_best,
                             self.charge_window_best,
                             self.discharge_window_best,
-                            self.discharge_limits_best,
+                            ignore_discharge_limits,
                             end_record=self.end_record,
                             region_start=region + self.minutes_now,
                             region_end=region_end + self.minutes_now,
                             fast=fast_mode,
                             quiet=True,
+                            best_metric=best_metric,
+                            best_cost=best_cost,
+                            best_keep=best_keep,
+                            best_soc_min=best_soc_min,
+                            best_price_charge=best_price,
+                            best_price_discharge=best_price_discharge,
                         )
                     region_size = int(region_size / 2)
 
@@ -10203,7 +10490,6 @@ class PredBat(hass.Hass):
             )
         )
         for pass_type in ["freeze", "normal", "low"]:
-            self.log("Optimisation pass type {}".format(pass_type))
             start_at_low = False
             if pass_type in ["low"]:
                 price_set.reverse()
@@ -10228,10 +10514,6 @@ class PredBat(hass.Hass):
                         self.charge_window_best[window_n]["set"] = price
                         window_start = self.charge_window_best[window_n]["start"]
 
-                        # Freeze pass is just discharge freeze
-                        if pass_type in ["freeze"]:
-                            continue
-
                         # For start at high only tune down excess high slots
                         if (not start_at_low) and (price > best_price) and (self.charge_limit_best[window_n] != self.soc_max):
                             if self.debug_enable:
@@ -10241,8 +10523,8 @@ class PredBat(hass.Hass):
                         if self.calculate_best_charge and (window_start not in self.manual_all_times):
                             if not printed_set:
                                 self.log(
-                                    "Optimise price set {} price {} start_at_low {} best_price {} best_metric {} best_cost {}".format(
-                                        price_key, price, start_at_low, best_price, self.dp2(best_metric), self.dp2(best_cost)
+                                    "Optimise price set {} pass {} price {} start_at_low {} best_price {} best_metric {} best_cost {}".format(
+                                        price_key, pass_type, price, start_at_low, best_price, self.dp2(best_metric), self.dp2(best_cost)
                                     )
                                 )
                                 printed_set = True
@@ -10256,7 +10538,6 @@ class PredBat(hass.Hass):
                                 self.discharge_window_best,
                                 self.discharge_limits_best,
                                 end_record=self.end_record,
-                                freeze_only=pass_type in ["freeze"],
                             )
                             self.charge_limit_best[window_n] = best_soc
 
@@ -10312,8 +10593,8 @@ class PredBat(hass.Hass):
 
                             if not printed_set:
                                 self.log(
-                                    "Optimise price set {} price {} start_at_low {} best_price {} best_metric {} best_cost {}".format(
-                                        price_key, price, start_at_low, best_price, self.dp2(best_metric), self.dp2(best_cost)
+                                    "Optimise price set {} pass {} price {} start_at_low {} best_price {} best_metric {} best_cost {}".format(
+                                        price_key, pass_type, price, start_at_low, best_price, self.dp2(best_metric), self.dp2(best_cost)
                                     )
                                 )
                                 printed_set = True
@@ -10371,6 +10652,26 @@ class PredBat(hass.Hass):
                     )
                 )
 
+        # Re-compute end record
+        self.end_record = self.record_length(self.charge_window_best, self.charge_limit_best, best_price)
+        record_charge_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.charge_window_best), 1)
+        record_discharge_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.discharge_window_best), 1)
+
+        # self.log("Swap optimisation started")
+        # self.charge_limit_best, best_soc, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep = self.optimise_charge_limit_swap(self.charge_limit_best, self.charge_window_best, self.discharge_window_best, self.discharge_limits_best, record_charge_windows, end_record=self.end_record)
+        # self.log(
+        #    "Best after swap best_metric {} best_cost {} metric_keep {} end_record {}".format(
+        #        self.dp2(best_metric),
+        #        self.dp2(best_cost),
+        #        self.dp2(best_keep),
+        #        self.time_abs_str(self.end_record + self.minutes_now)
+        #    )
+        # )
+        # Re-compute end record
+        # self.end_record = self.record_length(self.charge_window_best, self.charge_limit_best, best_price)
+        # record_charge_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.charge_window_best), 1)
+        # record_discharge_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.discharge_window_best), 1)
+
         if self.calculate_second_pass:
             self.log("Second pass optimisation started")
             count = 0
@@ -10425,8 +10726,12 @@ class PredBat(hass.Hass):
                     self.charge_limit_best[window_n] = 0
                 elif self.charge_window_best[window_n]["start"] in self.manual_discharge_times:
                     self.charge_limit_best[window_n] = 0
+                elif self.charge_window_best[window_n]["start"] in self.manual_freeze_discharge_times:
+                    self.charge_limit_best[window_n] = 0
                 elif self.charge_window_best[window_n]["start"] in self.manual_charge_times:
                     self.charge_limit_best[window_n] = self.soc_max
+                elif self.charge_window_best[window_n]["start"] in self.manual_freeze_charge_times:
+                    self.charge_limit_best[window_n] = self.reserve
 
         if self.discharge_window_best and self.calculate_best_discharge:
             for window_n in range(len(self.discharge_window_best)):
@@ -10434,6 +10739,8 @@ class PredBat(hass.Hass):
                     self.discharge_limits_best[window_n] = 100
                 elif self.discharge_window_best[window_n]["start"] in self.manual_discharge_times:
                     self.discharge_limits_best[window_n] = 0
+                elif self.discharge_window_best[window_n]["start"] in self.manual_freeze_discharge_times:
+                    self.discharge_limits_best[window_n] = 99
 
     def optimise_charge_windows_reset(self, reset_all):
         """
@@ -10669,11 +10976,17 @@ class PredBat(hass.Hass):
             )
 
         if pv_forecast_data:
+            pv_estimate = self.get_arg("pv_estimate", default="")
+            if pv_estimate is None:
+                pv_estimate = "pv_estimate"
+            else:
+                pv_estimate = "pv_estimate" + str(pv_estimate)
+
             pv_forecast_minute = self.minute_data(
                 pv_forecast_data,
                 self.forecast_days + 1,
                 self.midnight_utc,
-                "pv_estimate" + str(self.get_arg("pv_estimate", "")),
+                pv_estimate,
                 "period_start",
                 backwards=False,
                 divide_by=divide_by,
@@ -11237,6 +11550,7 @@ class PredBat(hass.Hass):
                     inverter.adjust_charge_rate(inverter.battery_rate_max_charge * MINUTE_WATT)
                     inverter.disable_charge_window()
                     inverter.adjust_battery_target(100.0, False)
+                    inverter.adjust_pause_mode()
                     self.isCharging = False
                 if self.set_charge_window or self.set_discharge_window or (self.inverter_needs_reset_force in ["set_read_only", "mode"]):
                     inverter.adjust_reserve(0)
@@ -11350,6 +11664,7 @@ class PredBat(hass.Hass):
                             if self.set_soc_enable and self.set_reserve_enable and self.set_reserve_hold:
                                 inverter.disable_charge_window()
                                 disabled_charge_window = True
+                            inverter.adjust_pause_mode(pause_discharge=True)
                             status = "Freeze charging"
                             status_extra = " target {}%".format(inverter.soc_percent)
                         else:
@@ -11363,8 +11678,10 @@ class PredBat(hass.Hass):
                                 status = "Hold charging"
                                 inverter.disable_charge_window()
                                 disabled_charge_window = True
+                                inverter.adjust_pause_mode(pause_discharge=True)
                             else:
                                 status = "Charging"
+                                inverter.adjust_pause_mode()
                             status_extra = " target {}%-{}%".format(inverter.soc_percent, self.charge_limit_percent_best[0])
                         inverter.adjust_charge_immediate(self.charge_limit_percent_best[0])
                         isCharging = True
@@ -11457,11 +11774,13 @@ class PredBat(hass.Hass):
                         if self.set_reserve_enable:
                             inverter.adjust_reserve(self.discharge_limits_best[0])
                             setReserve = True
+
                         status = "Discharging"
                         status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
                         if self.set_discharge_freeze:
                             # In discharge freeze mode we disable charging during discharge slots
                             inverter.adjust_charge_rate(0)
+                            inverter.adjust_pause_mode(pause_charge=True)
                         # Immediate discharge mode
                         inverter.adjust_discharge_immediate(self.discharge_limits_best[0])
                     else:
@@ -11470,9 +11789,11 @@ class PredBat(hass.Hass):
                         if self.set_discharge_freeze:
                             # In discharge freeze mode we disable charging during discharge slots
                             inverter.adjust_charge_rate(0)
+                            inverter.adjust_pause_mode(pause_charge=True)
                             self.log("Discharge Freeze as discharge is now at/below target - current SOC {} and target {}".format(self.soc_kw, discharge_soc))
                             status = "Freeze discharging"
                             status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
+                            isDischarging = True
                         else:
                             status = "Hold discharging"
                             status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
@@ -11481,6 +11802,7 @@ class PredBat(hass.Hass):
                                     self.soc_kw, discharge_soc
                                 )
                             )
+                            inverter.adjust_pause_mode()
                         resetReserve = True
                 else:
                     if (self.minutes_now < minutes_end) and ((minutes_start - self.minutes_now) <= self.set_window_minutes) and self.discharge_limits_best[0]:
@@ -11528,8 +11850,12 @@ class PredBat(hass.Hass):
                             break
 
             # Charging/Discharging off via service
-            if not isCharging and not isDischarging and self.set_charge_window:
+            if not isCharging and (not isDischarging or disabled_discharge) and self.set_charge_window:
                 inverter.adjust_charge_immediate(0)
+
+            # Pause charge off
+            if not isCharging and not isDischarging:
+                inverter.adjust_pause_mode()
 
             # Reset discharge rate?
             if resetDischarge:
@@ -11537,26 +11863,41 @@ class PredBat(hass.Hass):
 
             # Set the SOC just before or within the charge window
             if self.set_soc_enable:
-                if (
+                if (isDischarging and not disabled_discharge) and not self.set_reserve_enable:
+                    # If we are discharging and not setting reserve then we should reset the target SOC to 0%
+                    # as some inverters can use this as a target for discharge
+                    inverter.adjust_battery_target(self.discharge_limits_best[0], False)
+                elif (
                     self.charge_limit_best
                     and (self.minutes_now < inverter.charge_end_time_minutes)
-                    and ((inverter.charge_start_time_minutes - self.minutes_now) <= self.set_soc_minutes)
+                    and ((inverter.charge_start_time_minutes - self.minutes_now) < self.set_soc_minutes)
                     and not (disabled_charge_window)
                 ):
-                    # In charge freeze hold the target SOC at the current value
-                    if self.set_charge_freeze and (self.charge_limit_best[0] == self.reserve):
-                        if isCharging:
-                            self.log("Within charge freeze setting target soc to current soc {}".format(inverter.soc_percent))
-                            inverter.adjust_battery_target(inverter.soc_percent, True)
+                    if inverter.inv_has_charge_enable_time or isCharging:
+                        # In charge freeze hold the target SOC at the current value
+                        if self.set_charge_freeze and (self.charge_limit_best[0] == self.reserve):
+                            if isCharging:
+                                self.log("Within charge freeze setting target soc to current soc {}".format(inverter.soc_percent))
+                                inverter.adjust_battery_target(inverter.soc_percent, True)
+                            else:
+                                # Not yet in the freeze, hold at 100% target SOC
+                                inverter.adjust_battery_target(100.0, False)
                         else:
-                            # Not yet in the freeze, hold at 100% target SOC
-                            inverter.adjust_battery_target(100.0, False)
+                            # If not charging and not hybrid we should reset the target % to 100 to avoid losing solar
+                            if not self.inverter_hybrid and self.inverter_soc_reset and not isCharging:
+                                inverter.adjust_battery_target(100.0, False)
+                            else:
+                                inverter.adjust_battery_target(self.charge_limit_percent_best[0], isCharging)
                     else:
-                        # If not charging and not hybrid we should reset the target % to 100 to avoid losing solar
-                        if not self.inverter_hybrid and self.inverter_soc_reset and not isCharging:
+                        if not inverter.inv_has_target_soc:
+                            # If the inverter doesn't support target soc and soc_enable is on then do that logic here:
+                            inverter.mimic_target_soc(0)
+                        elif not self.inverter_hybrid and self.inverter_soc_reset:
+                            # AC Coupled, charge to 0 on solar
                             inverter.adjust_battery_target(100.0, False)
                         else:
-                            inverter.adjust_battery_target(self.charge_limit_percent_best[0], isCharging)
+                            # Hybrid, no charge timer, set target soc back to 0
+                            inverter.adjust_battery_target(0, False)
                 else:
                     if not inverter.inv_has_target_soc:
                         # If the inverter doesn't support target soc and soc_enable is on then do that logic here:
@@ -11589,6 +11930,8 @@ class PredBat(hass.Hass):
                                 self.time_abs_str(self.minutes_now), self.set_soc_minutes, self.time_abs_str(inverter.charge_start_time_minutes)
                             )
                         )
+                        if not inverter.inv_has_charge_enable_time:
+                            inverter.adjust_battery_target(0, False)
 
             # If we should set reserve during charging
             if self.set_soc_enable and self.set_reserve_enable and not setReserve:
@@ -11768,12 +12111,12 @@ class PredBat(hass.Hass):
         self.carbon_intensity = {}
         self.carbon_history = {}
 
-        # Iboost load data
+        # iBoost load data
         if self.iboost_enable and "iboost_energy_today" in self.args:
             self.iboost_energy_today, iboost_energy_age = self.minute_data_load(self.now_utc, "iboost_energy_today", 1, required_unit="kWh")
             if iboost_energy_age >= 1:
                 self.iboost_today = self.dp2(abs(self.iboost_energy_today[0] - self.iboost_energy_today[self.minutes_now]))
-                self.log("IBoost energy today from sensor reads {} kWh".format(self.iboost_today))
+                self.log("iBoost energy today from sensor reads {} kWh".format(self.iboost_today))
 
         # Fetch extra load forecast
         self.load_forecast = self.fetch_extra_load_forecast(self.now_utc)
@@ -12574,7 +12917,7 @@ class PredBat(hass.Hass):
         # Enable load filtering
         self.load_filter_modal = self.get_arg("load_filter_modal")
 
-        # Iboost model
+        # iBoost solar diverter model
         self.iboost_enable = self.get_arg("iboost_enable")
         self.carbon_enable = self.get_arg("carbon_enable")
         self.iboost_solar = self.get_arg("iboost_solar")
@@ -12600,8 +12943,12 @@ class PredBat(hass.Hass):
         # Update list of slot times
         self.manual_charge_times = self.manual_times("manual_charge")
         self.manual_discharge_times = self.manual_times("manual_discharge")
+        self.manual_freeze_charge_times = self.manual_times("manual_freeze_charge")
+        self.manual_freeze_discharge_times = self.manual_times("manual_freeze_discharge")
         self.manual_idle_times = self.manual_times("manual_idle")
-        self.manual_all_times = self.manual_charge_times + self.manual_discharge_times + self.manual_idle_times
+        self.manual_all_times = (
+            self.manual_charge_times + self.manual_discharge_times + self.manual_idle_times + self.manual_freeze_charge_times + self.manual_freeze_discharge_times
+        )
         # Update list of config options to save/restore to
         self.update_save_restore_list()
 
@@ -12689,7 +13036,7 @@ class PredBat(hass.Hass):
             else:
                 self.log("Will not recompute the plan, it is {} minutes old and max age is {} minutes".format(self.dp1(plan_age_minutes), self.calculate_plan_every))
 
-        # IBoost model update state, only on 5 minute intervals
+        # iBoost solar diverter model update state, only on 5 minute intervals
         if self.iboost_enable and scheduled:
             if self.iboost_energy_today:
                 # If we have a realtime sensor just use that data
@@ -12697,9 +13044,9 @@ class PredBat(hass.Hass):
             elif recompute and (self.minutes_now >= 0) and (self.minutes_now < self.calculate_plan_every):
                 # Reset at midnight
                 self.iboost_next = 0
-            # Save next IBoost model value
+            # Save next iBoost model value
             self.expose_config("iboost_today", self.iboost_next)
-            self.log("IBoost model today updated to {}".format(self.iboost_next))
+            self.log("iBoost model today updated to {}".format(self.iboost_next))
 
         # Car SOC increment
         if scheduled:
