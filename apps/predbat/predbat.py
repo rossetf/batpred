@@ -27,7 +27,7 @@ from multiprocessing import Pool, cpu_count
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.17.5"
+THIS_VERSION = "v7.17.6"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -2298,6 +2298,20 @@ class Inverter:
                 if not self.rest_data:
                     self.auto_restart("REST read failure")
 
+        # Timed pause support?
+        if self.inv_has_timed_pause:
+            entity_mode = self.base.get_arg("pause_mode", indirect=False, index=self.id)
+            if entity_mode:
+                old_pause_mode = self.base.get_state(entity_mode)
+                if old_pause_mode is None:
+                    self.inv_has_timed_pause = False
+                    self.log("Inverter {} does not have timed pause support enabled".format(self.id))
+                else:
+                    self.log("Inverter {} has timed pause support enabled".format(self.id))
+            else:
+                self.inv_has_timed_pause = False
+                self.log("Inverter {} does not have timed pause support enabled".format(self.id))
+
         # Battery size, charge and discharge rates
         ivtime = None
         if self.rest_data and ("Invertor_Details" in self.rest_data):
@@ -2568,7 +2582,7 @@ class Inverter:
 
                 soc_percent = {}
                 for minute in range(0, min_len):
-                    soc_percent[minute] = calc_percent_limit(soc_kwh[minute], self.soc_max)
+                    soc_percent[minute] = calc_percent_limit(soc_kwh.get(minute, 0), self.soc_max)
 
                 if discharge:
                     search_range = range(5, 20, 1)
@@ -2583,31 +2597,35 @@ class Inverter:
                             not discharge
                             and soc_percent.get(minute - 1, 0) == (data_point + 1)
                             and soc_percent.get(minute, 0) == data_point
-                            and predbat_status[minute - 1] == "Charging"
-                            and predbat_status[minute] == "Charging"
-                            and predbat_status[minute + 1] == "Charging"
-                            and charge_rate[minute - 1] == max_power
-                            and charge_rate[minute] == max_power
-                            and battery_power[minute] < 0
+                            and predbat_status.get(minute - 1, "") == "Charging"
+                            and predbat_status.get(minute, "") == "Charging"
+                            and predbat_status.get(minute + 1, "") == "Charging"
+                            and charge_rate.get(minute - 1, 0) == max_power
+                            and charge_rate.get(minute, 0) == max_power
+                            and battery_power.get(minute, 0) < 0
                         ) or (
                             discharge
                             and soc_percent.get(minute - 1, 0) == (data_point - 1)
                             and soc_percent.get(minute, 0) == data_point
-                            and predbat_status[minute - 1] == "Discharging"
-                            and predbat_status[minute] == "Discharging"
-                            and predbat_status[minute + 1] == "Discharging"
-                            and charge_rate[minute - 1] == max_power
-                            and charge_rate[minute] == max_power
-                            and battery_power[minute] > 0
+                            and predbat_status.get(minute - 1, "") == "Discharging"
+                            and predbat_status.get(minute, "") == "Discharging"
+                            and predbat_status.get(minute + 1, "") == "Discharging"
+                            and charge_rate.get(minute - 1, 0) == max_power
+                            and charge_rate.get(minute, 0) == max_power
+                            and battery_power.get(minute, 0) > 0
                         ):
                             total_power = 0
                             total_count = 0
                             # Find a period where charging was at full rate and the SOC just drops below the data point
                             for target_minute in range(minute, min_len):
                                 this_soc = soc_percent.get(target_minute, 0)
-                                if not discharge and (predbat_status[target_minute] != "Charging" or charge_rate[minute] != max_power or battery_power[minute] >= 0):
+                                if not discharge and (
+                                    predbat_status.get(target_minute, "") != "Charging" or charge_rate.get(minute, 0) != max_power or battery_power.get(minute, 0) >= 0
+                                ):
                                     break
-                                if discharge and (predbat_status[target_minute] != "Discharging" or charge_rate[minute] != max_power or battery_power[minute] <= 0):
+                                if discharge and (
+                                    predbat_status.get(target_minute, "") != "Discharging" or charge_rate.get(minute, 0) != max_power or battery_power.get(minute, 0) <= 0
+                                ):
                                     break
 
                                 if (discharge and (this_soc > data_point)) or (not discharge and (this_soc < data_point)):
@@ -2620,8 +2638,8 @@ class Inverter:
                                         this_soc += 1
                                     # So the power for this data point average has been stored, it's possible we spanned more than one data point
                                     # if not all SOC %'s are represented for this battery size
-                                    from_soc = soc_kwh[minute]
-                                    to_soc = soc_kwh[target_minute]
+                                    from_soc = soc_kwh.get(minute, 0)
+                                    to_soc = soc_kwh.get(target_minute, 0)
                                     soc_charged = from_soc - to_soc
                                     average_power = total_power / total_count
                                     charge_curve = round(min(average_power / max_power / self.base.battery_loss, 1.0), 2)
@@ -2654,7 +2672,7 @@ class Inverter:
                                     break
                                 else:
                                     # Store data
-                                    total_power += abs(battery_power[minute])
+                                    total_power += abs(battery_power.get(minute, 0))
                                     total_count += 1
                 if final_curve:
                     # Average the data points
@@ -3397,6 +3415,10 @@ class Inverter:
         Inverter control for Pause mode
         """
 
+        # Ignore if inverter doesn't have pause mode
+        if not self.inv_has_timed_pause:
+            return
+
         entity_mode = self.base.get_arg("pause_mode", indirect=False, index=self.id)
         entity_start = self.base.get_arg("pause_start_time", indirect=False, index=self.id)
         entity_end = self.base.get_arg("pause_end_time", indirect=False, index=self.id)
@@ -3428,8 +3450,8 @@ class Inverter:
                 self.log("Note: Inverter {} does not have pause_end_time entity".format(self.id))
                 entity_end = None
 
-        if not entity_mode or not self.inv_has_timed_pause:
-            self.log("Note: Inverter {} does not have pause_mode entity configured".format(self.id))
+        if not entity_mode:
+            self.log("Warn: Inverter {} does not have pause_mode entity configured correctly".format(self.id))
             return
 
         # Some inverters have start/end time registers
@@ -11661,18 +11683,17 @@ class PredBat(hass.Hass):
                             resetDischarge = False
 
                         if self.set_charge_freeze and (self.charge_limit_best[0] == self.reserve):
-                            if self.set_soc_enable and self.set_reserve_enable and self.set_reserve_hold:
+                            if self.set_soc_enable and ((self.set_reserve_enable and self.set_reserve_hold) or inverter.inv_has_timed_pause):
                                 inverter.disable_charge_window()
                                 disabled_charge_window = True
-                            inverter.adjust_pause_mode(pause_discharge=True)
+                                inverter.adjust_pause_mode(pause_discharge=True)
                             status = "Freeze charging"
                             status_extra = " target {}%".format(inverter.soc_percent)
                         else:
                             if (
                                 self.set_soc_enable
-                                and self.set_reserve_enable
-                                and self.set_reserve_hold
-                                and ((inverter.soc_percent + 1) >= self.charge_limit_percent_best[0])
+                                and ((self.set_reserve_enable and self.set_reserve_hold) or inverter.inv_has_timed_pause)
+                                and (inverter.soc_percent >= self.charge_limit_percent_best[0])
                                 and (inverter.reserve_max >= inverter.soc_percent)
                             ):
                                 status = "Hold charging"
@@ -12642,6 +12663,9 @@ class PredBat(hass.Hass):
         """
         item = self.config_index.get(config_item)
         if not item:
+            return
+        if not value:
+            # Ignore null selections
             return
         values = item.get("value", "")
         if not values:
