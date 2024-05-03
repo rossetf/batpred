@@ -1157,6 +1157,7 @@ INVERTER_DEF = {
         "has_service_api": False,
         "has_target_soc": True,
         "has_reserve_soc": False,
+        "has_timed_pause": False,
         #"charge_time_format": "H M",
         "charge_time_format": "HH:MM:SS",
         "charge_time_entity_is_option": False,
