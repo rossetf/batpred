@@ -28,7 +28,7 @@ import asyncio
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.18.1"
+THIS_VERSION = "v7.18.2"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -1140,7 +1140,8 @@ INVERTER_DEF = {
         "has_rest_api": False,
         "has_mqtt_api": False,
         "has_service_api": True,
-        "output_charge_control": "power",
+        "output_charge_control": "current",
+        "current_dp": 0,
         "has_charge_enable_time": False,
         "has_discharge_enable_time": False,
         "has_target_soc": True,
@@ -1828,12 +1829,13 @@ class Prediction:
                     else:
                         self.iboost_running = False
 
-            # discharge freeze?
+            # discharge freeze, reset charge rate by default
             if self.set_discharge_freeze:
                 charge_rate_now = self.battery_rate_max_charge
+                # Freeze mode
                 if (discharge_window_n >= 0) and discharge_limits[discharge_window_n] < 100.0:
-                    # Freeze mode
-                    charge_rate_now = self.battery_rate_min  # 0
+                    if self.set_discharge_freeze_only or ((soc - step * self.battery_rate_max_discharge_scaled) < (self.soc_max * discharge_limits[discharge_window_n] / 100.0)):
+                        charge_rate_now = self.battery_rate_min  # 0
 
             # Set discharge during charge?
             if not self.set_discharge_during_charge:
@@ -2283,6 +2285,7 @@ class Inverter:
         self.inv_has_service_api = INVERTER_DEF[self.inverter_type]["has_service_api"]
         self.inv_mqtt_topic = self.base.get_arg("mqtt_topic", "Sofar2mqtt")
         self.inv_output_charge_control = INVERTER_DEF[self.inverter_type]["output_charge_control"]
+        self.inv_current_dp = INVERTER_DEF[self.inverter_type].get("current_dp", 1)
         self.inv_has_charge_enable_time = INVERTER_DEF[self.inverter_type]["has_charge_enable_time"]
         self.inv_has_discharge_enable_time = INVERTER_DEF[self.inverter_type]["has_discharge_enable_time"]
         self.inv_has_target_soc = INVERTER_DEF[self.inverter_type]["has_target_soc"]
@@ -3299,8 +3302,7 @@ class Inverter:
 
         """
         # SOC has no decimal places and clamp in min
-        soc = int(soc)
-        soc = max(soc, self.reserve_percent)
+        soc = int(max(soc, self.reserve_percent))
 
         # Check current setting and adjust
         if SIMULATE:
@@ -3945,18 +3947,21 @@ class Inverter:
             power = self.base.get_arg(f"{direction}_rate", index=self.id, default=2600.0)
             self.set_current_from_power(direction, power)
         else:
-            # To disable we set both times to 00:00
-            for x in ["start", "end"]:
-                for y in ["hour", "minute"]:
-                    name = f"{direction}_{x}_{y}"
-                    entity = self.base.get_entity(self.base.get_arg(name, indirect=False, index=self.id))
-                    self.write_and_poll_value(name, entity, 0)
+            if self.inv_charge_time_format == "H M":
+                # To disable we set both times to 00:00
+                for x in ["start", "end"]:
+                    for y in ["hour", "minute"]:
+                        name = f"{direction}_{x}_{y}"
+                        entity = self.base.get_entity(self.base.get_arg(name, indirect=False, index=self.id))
+                        self.write_and_poll_value(name, entity, 0)
+            else:
+                self.set_current_from_power(direction, 0)
 
     def set_current_from_power(self, direction, power):
         """
         Set the timed charge/discharge current setting by converting power to current
         """
-        new_current = round(power / self.battery_voltage, 1)
+        new_current = round(power / self.battery_voltage, self.inv_current_dp)
         entity = self.base.get_entity(self.base.get_arg(f"timed_{direction}_current", indirect=False, index=self.id))
         self.write_and_poll_value(f"timed_{direction}_current", entity, new_current, fuzzy=1)
 
@@ -7333,6 +7338,43 @@ class PredBat(hass.Hass):
                         self.load_scaling_dynamic[minute] = self.load_scaling_saving
                     rate_replicate[minute] = "saving"
 
+    def decode_octopus_slot(self, slot):
+        """
+        Decode IOG slot
+        """
+        if "start" in slot:
+            start = datetime.strptime(slot["start"], TIME_FORMAT)
+            end = datetime.strptime(slot["end"], TIME_FORMAT)
+        else:
+            start = datetime.strptime(slot["startDtUtc"], TIME_FORMAT_OCTOPUS)
+            end = datetime.strptime(slot["endDtUtc"], TIME_FORMAT_OCTOPUS)
+
+        source = slot.get("source", "")
+        location = slot.get("location", "")
+
+        start_minutes = self.minutes_to_time(start, self.midnight_utc)
+        end_minutes = self.minutes_to_time(end, self.midnight_utc)
+        org_minutes = end_minutes - start_minutes
+
+        # Cap slot times into the forecast itself
+        start_minutes = max(start_minutes, 0)
+        end_minutes = min(end_minutes, self.forecast_minutes + self.minutes_now)
+        cap_minutes = end_minutes - start_minutes
+        cap_hours = cap_minutes / 60
+
+        # The load expected is stored in chargeKwh for the period in use
+        if "charge_in_kwh" in slot:
+            kwh = abs(float(slot.get("charge_in_kwh", 0.0)))
+        else:
+            kwh = abs(float(slot.get("chargeKwh", 0.0)))
+
+        if not kwh:
+            kwh = self.car_charging_rate[0] * cap_hours
+        else:
+            kwh = kwh * cap_minutes / org_minutes
+
+        return start_minutes, end_minutes, kwh, source, location
+
     def load_octopus_slots(self, octopus_slots):
         """
         Turn octopus slots into charging plan
@@ -7340,25 +7382,8 @@ class PredBat(hass.Hass):
         new_slots = []
 
         for slot in octopus_slots:
-            if "start" in slot:
-                start = datetime.strptime(slot["start"], TIME_FORMAT)
-                end = datetime.strptime(slot["end"], TIME_FORMAT)
-            else:
-                start = datetime.strptime(slot["startDtUtc"], TIME_FORMAT_OCTOPUS)
-                end = datetime.strptime(slot["endDtUtc"], TIME_FORMAT_OCTOPUS)
-            source = slot.get("source", "")
-            start_minutes = max(self.minutes_to_time(start, self.midnight_utc), 0)
-            end_minutes = min(self.minutes_to_time(end, self.midnight_utc), self.forecast_minutes)
-            slot_minutes = end_minutes - start_minutes
-            slot_hours = slot_minutes / 60.0
-
-            # The load expected is stored in chargeKwh for the period in use
-            if "charge_in_kwh" in slot:
-                kwh = abs(float(slot.get("charge_in_kwh", self.car_charging_rate[0] * slot_hours)))
-            else:
-                kwh = abs(float(slot.get("chargeKwh", self.car_charging_rate[0] * slot_hours)))
-
-            if end_minutes > self.minutes_now:
+            start_minutes, end_minutes, kwh, source, location = self.decode_octopus_slot(slot)
+            if end_minutes > self.minutes_now and (not location or location == "AT_HOME"):
                 new_slot = {}
                 new_slot["start"] = start_minutes
                 new_slot["end"] = end_minutes
@@ -7829,22 +7854,7 @@ class PredBat(hass.Hass):
         if octopus_slots:
             # Add in IO slots
             for slot in octopus_slots:
-                if "start" in slot:
-                    start = datetime.strptime(slot["start"], TIME_FORMAT)
-                    end = datetime.strptime(slot["end"], TIME_FORMAT)
-                else:
-                    start = datetime.strptime(slot["startDtUtc"], TIME_FORMAT_OCTOPUS)
-                    end = datetime.strptime(slot["endDtUtc"], TIME_FORMAT_OCTOPUS)
-                source = slot.get("source", "")
-                location = slot.get("location", "")
-                if "charge_in_kwh" in slot:
-                    kwh = abs(float(slot.get("charge_in_kwh", 0)))
-                else:
-                    kwh = abs(float(slot.get("chargeKwh", 0)))
-
-                # Change to minutes
-                start_minutes = self.minutes_to_time(start, self.midnight_utc)
-                end_minutes = self.minutes_to_time(end, self.midnight_utc)
+                start_minutes, end_minutes, kwh, source, location = self.decode_octopus_slot(slot)
 
                 # Ignore bump-charge slots as their cost won't change
                 if source != "bump-charge" and (not location or location == "AT_HOME"):
@@ -12147,10 +12157,6 @@ class PredBat(hass.Hass):
 
                         status = "Discharging"
                         status_extra = " target {}%-{}%".format(inverter.soc_percent, self.discharge_limits_best[0])
-                        if self.set_discharge_freeze:
-                            # In discharge freeze mode we disable charging during discharge slots
-                            inverter.adjust_charge_rate(0)
-                            inverter.adjust_pause_mode(pause_charge=True)
                         # Immediate discharge mode
                         inverter.adjust_discharge_immediate(self.discharge_limits_best[0])
                     else:
