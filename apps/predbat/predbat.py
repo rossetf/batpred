@@ -28,7 +28,7 @@ import asyncio
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.18.2"
+THIS_VERSION = "v7.18.6"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -37,6 +37,8 @@ TIME_FORMAT_SOLIS = "%Y-%m-%d %H:%M:%S"
 PREDICT_STEP = 5
 RUN_EVERY = 5
 CONFIG_ROOTS = ["/config", "/conf", "/homeassistant"]
+TIME_FORMAT_HA = "%Y-%m-%dT%H:%M:%S%z"
+TIMEOUT = 60 * 2
 
 # 240v x 100 amps x 3 phases / 1000 to kW / 60 minutes in an hour is the maximum kWh in a 1 minute period
 MAX_INCREMENT = 240 * 100 * 3 / 1000 / 60
@@ -85,6 +87,7 @@ CONFIG_ITEMS = [
         "friendly_name": "Predbat Active",
         "type": "switch",
         "default": False,
+        "restore": False,
     },
     {
         "name": "pv_metric10_weight",
@@ -1849,6 +1852,9 @@ class Prediction:
             battery_draw = 0
             charge_rate_now_curve = get_charge_rate_curve(self, soc, charge_rate_now)
             discharge_rate_now_curve = get_discharge_rate_curve(self, soc, discharge_rate_now)
+            battery_to_min = max(soc - self.reserve, 0) * self.battery_loss_discharge * self.inverter_loss
+            battery_to_max = max(self.soc_max - soc, 0) * self.battery_loss * self.inverter_loss
+
             if (
                 not self.set_discharge_freeze_only
                 and (discharge_window_n >= 0)
@@ -1861,21 +1867,28 @@ class Prediction:
 
                 # It's assumed if SOC hits the expected reserve then it's terminated
                 reserve_expected = max((self.soc_max * discharge_limits[discharge_window_n]) / 100.0, self.reserve)
-                battery_draw = discharge_rate_now_curve * step
-                if (soc - reserve_expected) < battery_draw:
-                    battery_draw = max(soc - reserve_expected, 0)
+                battery_draw = min(discharge_rate_now_curve * step, battery_to_min)
 
                 # Account for export limit, clip battery draw if possible to avoid going over
                 diff_tmp = load_yesterday - (battery_draw + pv_dc + pv_ac)
                 if diff_tmp < 0 and abs(diff_tmp) > (self.export_limit * step):
                     above_limit = abs(diff_tmp + self.export_limit * step)
-                    battery_draw = max(0, battery_draw - above_limit)
+                    battery_draw = max(-charge_rate_now_curve * step, battery_draw - above_limit)
 
                 # Account for inverter limit, clip battery draw if possible to avoid going over
-                total_inverted = pv_ac + pv_dc + battery_draw
-                if total_inverted > self.inverter_limit * step:
-                    reduce_by = total_inverted - (self.inverter_limit * step)
-                    battery_draw = max(0, battery_draw - reduce_by)
+                if self.inverter_hybrid and diff_tmp < 0 and abs(diff_tmp) > (self.inverter_limit * step):
+                    above_limit = abs(diff_tmp + self.inverter_limit * step)
+                    battery_draw = max(-charge_rate_now_curve * step, battery_draw - above_limit)
+
+                # If the battery is charging then solar will be used to charge as a priority
+                # So move more of the PV into PV DC
+                if battery_draw < 0 and pv_dc < abs(battery_draw):
+                    extra_pv = min(abs(battery_draw) - pv_dc, pv_ac)
+                    # Clamp to remaining energy to charge limit
+                    if (extra_pv + pv_dc) > (charge_limit_n - soc):
+                        extra_pv = max((charge_limit_n - soc) - pv_dc, 0)
+                    pv_ac -= extra_pv
+                    pv_dc += extra_pv
 
                 battery_state = "f-"
 
@@ -1906,20 +1919,36 @@ class Prediction:
 
                 # Remove inverter loss as it will be added back in again when calculating the SOC change
                 charge_rate_now_curve /= self.inverter_loss
-                battery_draw = -max(min(charge_rate_now_curve * step, charge_limit_n - soc), 0)
+                battery_draw = -max(min(charge_rate_now_curve * step, charge_limit_n - soc), 0, -battery_to_max)
                 battery_state = "f+"
                 first_charge = min(first_charge, minute)
             else:
                 # ECO Mode
                 if load_yesterday - pv_ac - pv_dc > 0:
-                    battery_draw = min(load_yesterday - pv_ac - pv_dc, discharge_rate_now_curve * step, self.inverter_limit * step - pv_ac)
+                    battery_draw = min(load_yesterday - pv_ac - pv_dc, discharge_rate_now_curve * step, self.inverter_limit * step - pv_ac, battery_to_min)
                     battery_state = "e-"
                 else:
-                    battery_draw = max(load_yesterday - pv_ac - pv_dc, -charge_rate_now_curve * step)
+                    battery_draw = max(load_yesterday - pv_ac - pv_dc, -charge_rate_now_curve * step, -battery_to_max)
                     if battery_draw < 0:
                         battery_state = "e+"
                     else:
                         battery_state = "e~"
+
+            # Account for inverter limit, clip battery draw if possible to avoid going over
+            if self.inverter_hybrid:
+                total_inverted = pv_ac + max(pv_dc + battery_draw, 0)
+            else:
+                total_inverted = pv_ac + pv_dc + abs(battery_draw)
+
+            if total_inverted > self.inverter_limit * step:
+                reduce_by = total_inverted - (self.inverter_limit * step)
+                if battery_draw < 0:
+                    pv_ac -= reduce_by
+                    if not self.inverter_hybrid and pv_ac < 0:
+                        pv_dc = max(pv_dc + pv_ac, 0)
+                        pv_ac = 0
+                else:
+                    battery_draw = max(0, battery_draw - reduce_by)
 
             # Clamp battery at reserve for discharge
             if battery_draw > 0:
@@ -2551,10 +2580,10 @@ class Inverter:
         if soc_kwh_sensor and charge_rate_sensor and battery_power_sensor and predbat_status_sensor:
             battery_power_sensor = battery_power_sensor.replace("number.", "sensor.")  # Workaround as old template had number.
             self.log("Find {} curve with sensors {} and {} and {} and {}".format(curve_type, soc_kwh_sensor, charge_rate_sensor, predbat_status_sensor, battery_power_sensor))
-            soc_kwh_data = self.base.get_history_async(entity_id=soc_kwh_sensor, days=self.base.max_days_previous)
-            charge_rate_data = self.base.get_history_async(entity_id=charge_rate_sensor, days=self.base.max_days_previous)
-            predbat_status_data = self.base.get_history_async(entity_id=predbat_status_sensor, days=self.base.max_days_previous)
-            battery_power_data = self.base.get_history_async(entity_id=battery_power_sensor, days=self.base.max_days_previous)
+            soc_kwh_data = self.base.get_history_wrapper(entity_id=soc_kwh_sensor, days=self.base.max_days_previous)
+            charge_rate_data = self.base.get_history_wrapper(entity_id=charge_rate_sensor, days=self.base.max_days_previous)
+            predbat_status_data = self.base.get_history_wrapper(entity_id=predbat_status_sensor, days=self.base.max_days_previous)
+            battery_power_data = self.base.get_history_wrapper(entity_id=battery_power_sensor, days=self.base.max_days_previous)
 
             if soc_kwh_data and charge_rate_data and charge_rate_data and battery_power_data:
                 soc_kwh = self.base.minute_data(
@@ -4409,24 +4438,13 @@ class PredBat(hass.Hass):
     The battery prediction class itself
     """
 
-    def run_async(self, func):
-        """
-        Run async func as sync
-        """
-        task = self.create_task(func)
-        count = 0
-        while not task.done() and count < 60 * 100:
-            time.sleep(0.01)
-            count += 1
-        if not task.done():
-            raise Exception("Timeout waiting for async function to complete")
-        return task.result()
-
     def call_notify(self, message):
         """
         Sync wrapper for call_notify
         """
-        return self.run_async(self.async_call_notify(message))
+        for device in self.notify_devices:
+            self.call_service("notify/" + device, message=message)
+        return True
 
     async def async_call_notify(self, message):
         """
@@ -5054,27 +5072,17 @@ class PredBat(hass.Hass):
             self.log("Car charging hold {} threshold {}".format(self.car_charging_hold, self.car_charging_threshold * 60.0))
         return self.car_charging_energy
 
-    async def get_history_async_hook(self, entity_id, days):
-        """
-        Async function to get history from HA
-        """
-        if days:
-            history = await self.get_history(entity_id=entity_id, days=days)
-        else:
-            history = await self.get_history(entity_id=entity_id)
-        return history
-
-    def get_history_async(self, entity_id, days=None):
+    def get_history_wrapper(self, entity_id, days=30):
         """
         Async function to get history from HA using Async task
         """
-        result = self.run_async(self.get_history_async_hook(entity_id, days))
+        history = self.ha_interface.get_history(entity_id, days=days, now=self.now)
 
-        if result is None:
-            self.log("Failure to fetch history for {}".format(entity_id))
+        if history is None:
+            self.log("Error: Failure to fetch history for {}".format(entity_id))
             raise ValueError
         else:
-            return result
+            return history
 
     def minute_data_import_export(self, now_utc, key, scale=1.0, required_unit=None, increment=True, smoothing=True):
         """
@@ -5091,7 +5099,7 @@ class PredBat(hass.Hass):
         import_today = {}
         for entity_id in entity_ids:
             try:
-                history = self.get_history_async(entity_id=entity_id, days=self.max_days_previous)
+                history = self.get_history_wrapper(entity_id=entity_id, days=self.max_days_previous)
             except (ValueError, TypeError):
                 history = []
 
@@ -5127,7 +5135,11 @@ class PredBat(hass.Hass):
         load_minutes = {}
         age_days = None
         for entity_id in entity_ids:
-            history = self.get_history_async(entity_id=entity_id, days=max_days_previous)
+            try:
+                history = self.get_history_wrapper(entity_id=entity_id, days=max_days_previous)
+            except ValueError:
+                history = []
+
             if history:
                 item = history[0][0]
                 try:
@@ -13017,13 +13029,13 @@ class PredBat(hass.Hass):
         self.log("Base charge    window {}".format(self.window_as_text(self.charge_window, self.charge_limit_percent)))
         self.log("Base discharge window {}".format(self.window_as_text(self.discharge_window, self.discharge_limits)))
 
-    def manual_select(self, config_item, value):
-        """
-        Wrapper for async manual times
-        """
-        return self.run_async(self.async_manual_select(config_item, value))
-
     async def async_manual_select(self, config_item, value):
+        """
+        Async wrapper for selection on manual times dropdown
+        """
+        return await self.run_in_executor(self.manual_select, config_item, value)
+
+    def manual_select(self, config_item, value):
         """
         Selection on manual times dropdown
         """
@@ -13061,22 +13073,16 @@ class PredBat(hass.Hass):
 
         if not item_value:
             item_value = "off"
-        await self.async_manual_times(config_item, new_value=item_value)
+        self.manual_times(config_item, new_value=item_value)
 
         # Update other drop downs that may need this time excluding
         for item in CONFIG_ITEMS:
             if item["name"] != config_item and item.get("manual"):
                 value = item.get("value", "")
                 if value and value != "reset" and exclude_list:
-                    await self.async_manual_times(item["name"], exclude=exclude_list)
+                    self.manual_times(item["name"], exclude=exclude_list)
 
     def manual_times(self, config_item, exclude=[], new_value=None):
-        """
-        Wrapper for async manual times
-        """
-        return self.run_async(self.async_manual_times(config_item=config_item, exclude=exclude, new_value=new_value))
-
-    async def async_manual_times(self, config_item, exclude=[], new_value=None):
         """
         Update manual times sensor
         """
@@ -13132,13 +13138,12 @@ class PredBat(hass.Hass):
         item["options"] = time_values
         if not values:
             values = "off"
-        await self.async_expose_config(config_item, values, force=True)
+        self.expose_config(config_item, values, force=True)
 
         if time_overrides:
             time_txt = []
             for minute in time_overrides:
                 time_txt.append(self.time_abs_str(minute))
-            self.log("Manual override: {} times now {}".format(config_item, time_txt))
         return time_overrides
 
     def fetch_config_options(self):
@@ -13374,8 +13379,8 @@ class PredBat(hass.Hass):
         """
         Update the current time/date
         """
-        local_tz = pytz.timezone(self.get_arg("timezone", "Europe/London"))
-        skew = self.get_arg("clock_skew", 0)
+        local_tz = pytz.timezone(self.args.get("timezone", "Europe/London"))
+        skew = self.args.get("clock_skew", 0)
         if skew:
             self.log("WARN: Clock skew is set to {} minutes".format(skew))
         self.now_utc_real = datetime.now(local_tz)
@@ -13388,6 +13393,7 @@ class PredBat(hass.Hass):
             now_utc += timedelta(minutes=self.simulate_offset)
 
         self.now_utc = now_utc
+        self.now = now
         self.midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         self.midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -13547,13 +13553,13 @@ class PredBat(hass.Hass):
             self.log("WARN: Downloading Predbat file failed, URL {}".format(url))
             return None
 
-    def download_predbat_version(self, version):
+    async def async_download_predbat_version(self, version):
         """
         Sync wrapper for async download_predbat_version
         """
-        return self.run_async(self.async_download_predbat_version(version))
+        return await self.run_in_executor(self.download_predbat_version, version)
 
-    async def async_download_predbat_version(self, version):
+    def download_predbat_version(self, version):
         """
         Download a version of Predbat from GitHub
 
@@ -13567,7 +13573,7 @@ class PredBat(hass.Hass):
             self.log("WARN: Predbat update requested for the same version as we are running ({}), no update required".format(version))
             return
 
-        await self.async_expose_config("version", True, force=True, in_progress=True)
+        self.expose_config("version", True, force=True, in_progress=True)
         tag_split = version.split(" ")
         this_path = os.path.dirname(__file__)
         self.log("Split returns {}".format(tag_split))
@@ -13605,7 +13611,7 @@ class PredBat(hass.Hass):
                     self.pool = None
 
                 # Notify that we are about to update
-                await self.async_call_notify("Predbat: update to: {}".format(version))
+                self.call_notify("Predbat: update to: {}".format(version))
 
                 # Perform the update
                 self.log("Perform the update.....")
@@ -13772,13 +13778,10 @@ class PredBat(hass.Hass):
             return value, default
         return None, default
 
-    def expose_config(self, name, value, quiet=True, event=False, force=False, in_progress=False):
-        """
-        Wrapper for async expose config
-        """
-        return self.run_async(self.async_expose_config(name, value, quiet, event, force, in_progress))
-
     async def async_expose_config(self, name, value, quiet=True, event=False, force=False, in_progress=False):
+        return await self.run_in_executor(self.expose_config, name, value, quiet, event, force, in_progress)
+
+    def expose_config(self, name, value, quiet=True, event=False, force=False, in_progress=False):
         """
         Share the config with HA
         """
@@ -13833,7 +13836,7 @@ class PredBat(hass.Hass):
                         options = item["options"]
                         if value not in options:
                             options.append(value)
-                        old_state = await self.get_state(entity_id=entity)
+                        old_state = self.get_state(entity_id=entity)
                         if old_state and old_state != value:
                             self.set_state(entity_id=entity, state=old_state, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
                         self.set_state(entity_id=entity, state=value, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
@@ -13887,13 +13890,10 @@ class PredBat(hass.Hass):
         if entity not in self.dashboard_index:
             self.dashboard_index.append(entity)
 
-    def update_save_restore_list(self):
-        """
-        Sync wrapper for sync update_save_restore_list
-        """
-        return self.run_async(self.async_update_save_restore_list())
-
     async def async_update_save_restore_list(self):
+        return await self.run_in_executor(self.update_save_restore_list)
+
+    def update_save_restore_list(self):
         """
         Update list of current Predbat settings
         """
@@ -13912,11 +13912,11 @@ class PredBat(hass.Hass):
         for root, dirs, files in os.walk(self.save_restore_dir):
             for name in files:
                 filepath = os.path.join(root, name)
-                if filepath.endswith(".yaml"):
+                if filepath.endswith(".yaml") and not name.startswith("."):
                     PREDBAT_SAVE_RESTORE.append(name)
         item = self.config_index.get("saverestore", None)
         item["options"] = PREDBAT_SAVE_RESTORE
-        await self.async_expose_config("saverestore", None)
+        self.expose_config("saverestore", None)
 
     async def async_restore_settings_yaml(self, filename):
         """
@@ -14057,7 +14057,7 @@ class PredBat(hass.Hass):
         ha_value = self.get_state(entity)
         if ha_value is not None:
             return ha_value
-        history = self.get_history_async(entity_id=entity)
+        history = self.get_history_wrapper(entity_id=entity)
         if history:
             history = history[0]
             ha_value = history[-1]["state"]
@@ -14074,6 +14074,8 @@ class PredBat(hass.Hass):
         current_status = self.load_previous_value_from_ha(self.prefix + ".status")
         if current_status:
             new_install = False
+        else:
+            self.log("New install detected")
 
         # Build config index
         for item in CONFIG_ITEMS:
@@ -14373,13 +14375,13 @@ class PredBat(hass.Hass):
         Setup the app, called once each time the app starts
         """
         global SIMULATE
+        self.pool = None
         self.log("Predbat: Startup {}".format(__name__))
-        skew = self.args.get("clock_skew", 0)
+        self.update_time(print=False)
         run_every = RUN_EVERY * 60
-        skew = skew % (run_every / 60)
-        now = datetime.now() + timedelta(minutes=skew)
-        self.midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        self.minutes_now = int((now - self.midnight).seconds / 60)
+        now = self.now
+
+        self.ha_interface = HAInterface(self)
 
         try:
             self.reset()
@@ -14443,11 +14445,13 @@ class PredBat(hass.Hass):
         """
         Called once each time the app terminates
         """
+        self.log("Predbat terminating")
+        if hasattr(self, "pool"):
+            if self.pool:
+                self.pool.close()
+                self.pool.join()
+                self.pool = None
         self.log("Predbat terminated")
-        if self.pool:
-            self.pool.close()
-            self.pool.join()
-            self.pool = None
 
     @ad.app_lock
     def update_time_loop(self, cb_args):
@@ -14504,3 +14508,82 @@ class PredBat(hass.Hass):
                 self.log("ERROR: Exception raised {}".format(e))
                 self.record_status("ERROR: Exception raised {}".format(e))
                 raise
+
+
+class HAInterface:
+    """
+    Direct interface to Home Assistant
+    """
+
+    def __init__(self, base):
+        self.ha_key = os.environ.get("SUPERVISOR_TOKEN", None)
+        self.ha_url = "http://supervisor/core"
+        self.base = base
+        self.log = base.log
+        if not self.ha_key:
+            self.log("WARN: Supervisor token not found, will use direct HA API")
+
+    def get_history(self, sensor, now, days=30):
+        """
+        Get the history for a sensor from Home Assistant.
+
+        :param sensor: The sensor to get the history for.
+        :return: The history for the sensor.
+        """
+        if not self.ha_key:
+            return self.base.get_history(sensor, days=days)
+
+        start = now - timedelta(days=days)
+        end = now
+        res = self.api_call("/api/history/period/{}".format(start.strftime(TIME_FORMAT_HA)), {"filter_entity_id": sensor, "end_time": end.strftime(TIME_FORMAT_HA)})
+        return res
+
+    def set_state(self, entity_id, state, attributes=None):
+        """
+        Set the state of an entity in Home Assistant.
+        """
+        if not self.ha_key:
+            if attributes:
+                return self.base.set_state(entity_id, state=state)
+            else:
+                return self.base.set_state(entity_id, state=state, attributes=attributes)
+
+        data = {"state": state}
+        if attributes:
+            data["attributes"] = attributes
+        self.api_call("/api/states/{}".format(entity_id), data, post=True)
+
+    def api_call(self, endpoint, data_in=None, post=False):
+        """
+        Make an API call to Home Assistant.
+
+        :param endpoint: The API endpoint to call.
+        :param data_in: The data to send in the body of the request.
+        :param post: True if this is a POST request, False for GET.
+        :return: The response from the API.
+        """
+        url = self.ha_url + endpoint
+        headers = {
+            "Authorization": "Bearer " + self.ha_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if post:
+            if data_in:
+                response = requests.post(url, headers=headers, json=data_in, timeout=TIMEOUT)
+            else:
+                response = requests.post(url, headers=headers, timeout=TIMEOUT)
+        else:
+            if data_in:
+                response = requests.get(url, headers=headers, params=data_in, timeout=TIMEOUT)
+            else:
+                response = requests.get(url, headers=headers, timeout=TIMEOUT)
+        try:
+            data = response.json()
+        except requests.exceptions.JSONDecodeError:
+            self.log("Warn: Failed to decode response from {}".format(url))
+            data = None
+        except (requests.Timeout, requests.exceptions.ReadTimeout):
+            self.log("Warn: Timeout from {}".format(url))
+            data = None
+        return data
