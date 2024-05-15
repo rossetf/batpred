@@ -73,6 +73,7 @@ iboost
 idag
 idetails
 inday
+invname
 isort
 ivtime
 kopt
@@ -113,6 +114,7 @@ Pred
 Predai
 Predbat
 Predheat
+pvbat
 pwindow
 pylint
 pyproject
