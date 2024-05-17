@@ -28,7 +28,7 @@ import asyncio
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.19.0"
+THIS_VERSION = "v7.19.1"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -5784,11 +5784,11 @@ class PredBat(hass.Hass):
             minute_timestamp = self.midnight_utc + timedelta(seconds=60 * this_minute_absolute)
             dstamp = minute_timestamp.strftime(TIME_FORMAT)
             stamp = minute_timestamp.strftime("%H:%M")
-            if record_time[dstamp] > 0:
-                break
             if txt:
                 txt += ", "
             txt += "%8s" % str(stamp)
+            if record_time[dstamp] > 0:
+                break
         return txt
 
     def scenario_summary(self, record_time, datap):
@@ -5803,11 +5803,11 @@ class PredBat(hass.Hass):
                 value = self.dp2(value)
                 if value > 10000:
                     value = self.dp0(value)
-            if record_time[stamp] > 0:
-                break
             if txt:
                 txt += ", "
             txt += "%8s" % str(value)
+            if record_time[stamp] > 0:
+                break
         return txt
 
     def scenario_summary_state(self, record_time):
@@ -9309,6 +9309,7 @@ class PredBat(hass.Hass):
         self.isCharging = False
         self.isDischarging = False
         self.savings_today_predbat = 0.0
+        self.savings_today_predbat_soc = 0.0
         self.savings_today_pvbat = 0.0
         self.yesterday_load_step = {}
         self.yesterday_pv_step = {}
@@ -11676,7 +11677,10 @@ class PredBat(hass.Hass):
             scale=1.0,
             required_unit="kWh",
         )
-        soc_yesterday = soc_kwh.get(24 * 60 + self.minutes_now, 0.0)
+        try:
+            soc_yesterday = float(self.get_state(self.prefix + ".savings_total_soc", default=0.0))
+        except (ValueError, TypeError):
+            soc_yesterday = 0.0
 
         # Shift rates back
         past_rates = self.history_to_future_rates(self.rate_import, 24 * 60)
@@ -11732,6 +11736,8 @@ class PredBat(hass.Hass):
         soc_max = self.soc_max
         rate_import = self.rate_import
         rate_export = self.rate_export
+        iboost_enable = self.iboost_enable
+        num_cars = self.num_cars
 
         # Fake to yesterday state
         self.minutes_now = 0
@@ -11740,32 +11746,46 @@ class PredBat(hass.Hass):
         self.export_today_now = 0
         self.carbon_today_sofar = 0
         self.midnight_utc = self.midnight_utc - timedelta(days=1)
-        self.forecast_minutes = 24 * 60
+        self.forecast_minutes = 25 * 60
         self.pv_today_now = 0
         self.soc_kw = soc_yesterday
         self.car_charging_hold = False
         self.load_minutes_now = 0
         self.rate_import = past_rates
         self.rate_export = past_rates_export
+        self.iboost_enable = False
+        self.num_cars = 0
 
         # Simulate yesterday
         self.prediction = Prediction(self, yesterday_pv_step, yesterday_pv_step, yesterday_load_step, yesterday_load_step)
-        metric, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = self.run_prediction(
-            charge_limit_best, charge_window_best, [], [], False, end_record=24 * 60
-        )
+        (
+            metric,
+            import_kwh_battery,
+            import_kwh_house,
+            export_kwh,
+            soc_min,
+            final_soc,
+            soc_min_minute,
+            battery_cycle,
+            metric_keep,
+            final_iboost,
+            final_carbon_g,
+        ) = self.run_prediction(charge_limit_best, charge_window_best, [], [], False, end_record=(24 * 60), save="yesterday")
         saving = metric - cost_yesterday
         self.log(
-            "Yesterday: Predbat disabled was {}p vs real {}p saving {}p with import {} export {} battery_cycle {} iboost {}".format(
+            "Yesterday: Predbat disabled was {}p vs real {}p saving {}p with import {} export {} battery_cycle {} start_soc {} final_soc {}".format(
                 self.dp2(metric),
                 self.dp2(cost_yesterday),
                 self.dp2(saving),
                 self.dp2(import_kwh_house + import_kwh_battery),
                 self.dp2(export_kwh),
                 self.dp2(battery_cycle),
-                self.dp2(final_iboost),
+                self.dp2(soc_yesterday),
+                self.dp2(final_soc),
             )
         )
         self.savings_today_predbat = saving
+        self.savings_today_predbat_soc = final_soc
 
         # Save state
         self.dashboard_item(
@@ -11775,7 +11795,8 @@ class PredBat(hass.Hass):
                 "import": self.dp2(import_kwh_house + import_kwh_battery),
                 "export": self.dp2(export_kwh),
                 "battery_cycle": self.dp2(battery_cycle),
-                "iboost": self.dp2(final_iboost),
+                "soc_yesterday": self.dp2(soc_yesterday),
+                "final_soc": self.dp2(final_soc),
                 "actual_cost": self.dp2(cost_yesterday),
                 "predicted_cost": self.dp2(metric),
                 "friendly_name": "Predbat savings yesterday",
@@ -11796,14 +11817,8 @@ class PredBat(hass.Hass):
         saving = metric - cost_yesterday
         self.savings_today_pvbat = saving
         self.log(
-            "Yesterday: No Battery/PV system cost predicted was {}p vs real {}p saving {}p with import {} export {} battery_cycle {} iboost {}".format(
-                self.dp2(metric),
-                self.dp2(cost_yesterday),
-                self.dp2(saving),
-                self.dp2(import_kwh_house + import_kwh_battery),
-                self.dp2(export_kwh),
-                self.dp2(battery_cycle),
-                self.dp2(final_iboost),
+            "Yesterday: No Battery/PV system cost predicted was {}p vs real {}p saving {}p with import {} export {}".format(
+                self.dp2(metric), self.dp2(cost_yesterday), self.dp2(saving), self.dp2(import_kwh_house + import_kwh_battery), self.dp2(export_kwh)
             )
         )
 
@@ -11815,7 +11830,6 @@ class PredBat(hass.Hass):
                 "import": self.dp2(import_kwh_house + import_kwh_battery),
                 "export": self.dp2(export_kwh),
                 "battery_cycle": self.dp2(battery_cycle),
-                "iboost": self.dp2(final_iboost),
                 "actual_cost": self.dp2(cost_yesterday),
                 "predicted_cost": self.dp2(metric),
                 "friendly_name": "PV/Battery system savings yesterday",
@@ -11840,6 +11854,8 @@ class PredBat(hass.Hass):
         self.soc_max = soc_max
         self.rate_import = rate_import
         self.rate_export = rate_export
+        self.iboost_enable = iboost_enable
+        self.num_cars = num_cars
 
     def calculate_plan(self, recompute=True):
         """
@@ -13749,14 +13765,21 @@ class PredBat(hass.Hass):
             except (ValueError, TypeError):
                 savings_total_pvbat = 0.0
 
+            savings_total_soc = self.load_previous_value_from_ha(self.prefix + ".savings_total_soc")
+            try:
+                savings_total_soc = float(savings_total_soc)
+            except (ValueError, TypeError):
+                savings_total_soc = 0.0
+
             # Increment total at midnight for next day
             if (self.minutes_now >= 0) and (self.minutes_now < self.calculate_plan_every) and scheduled and recompute:
                 savings_total_predbat += self.savings_today_predbat
                 savings_total_pvbat += self.savings_today_pvbat
+                savings_total_soc = self.savings_today_predbat_soc
 
             self.dashboard_item(
                 self.prefix + ".savings_total_predbat",
-                state=savings_total_predbat,
+                state=self.dp2(savings_total_predbat),
                 attributes={
                     "friendly_name": "Total Predbat savings",
                     "state_class": "measurement",
@@ -13765,8 +13788,18 @@ class PredBat(hass.Hass):
                 },
             )
             self.dashboard_item(
+                self.prefix + ".savings_total_soc",
+                state=self.dp2(savings_total_soc),
+                attributes={
+                    "friendly_name": "Predbat savings, yesterday SOC",
+                    "state_class": "measurement",
+                    "unit_of_measurement": "kWh",
+                    "icon": "mdi:battery-50",
+                },
+            )
+            self.dashboard_item(
                 self.prefix + ".savings_total_pvbat",
-                state=savings_total_pvbat,
+                state=self.dp2(savings_total_pvbat),
                 attributes={
                     "friendly_name": "Total Savings vs no PV/Battery system",
                     "state_class": "measurement",
