@@ -3,32 +3,38 @@ Battery Prediction app
 see Readme for information
 """
 
-
 import copy
 import os
 import re
 import time
 import math
+from datetime import datetime, timedelta
 
 # fmt off
 # pylint: disable=consider-using-f-string
 # pylint: disable=line-too-long
 # pylint: disable=attribute-defined-outside-init
-from datetime import datetime, timedelta
 
-import adbase as ad
-import appdaemon.plugins.hass.hassapi as hass
+# Import AppDaemon or our standalone wrapper
+try:
+    import adbase as ad
+    import appdaemon.plugins.hass.hassapi as hass
+except:
+    import hass as hass
+
 import pytz
 import requests
 import yaml
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, set_start_method
 import asyncio
+from aiohttp import web, ClientSession, WSMsgType
+import json
 
 # Only assign globals once to avoid re-creating them with processes are forked
 if not "PRED_GLOBAL" in globals():
     PRED_GLOBAL = {}
 
-THIS_VERSION = "v7.19.7"
+THIS_VERSION = "v7.20.6"
 PREDBAT_FILES = ["predbat.py"]
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TIME_FORMAT_SECONDS = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -36,9 +42,11 @@ TIME_FORMAT_OCTOPUS = "%Y-%m-%d %H:%M:%S%z"
 TIME_FORMAT_SOLIS = "%Y-%m-%d %H:%M:%S"
 PREDICT_STEP = 5
 RUN_EVERY = 5
-CONFIG_ROOTS = ["/config", "/conf", "/homeassistant"]
+CONFIG_ROOTS = ["/config", "/conf", "/homeassistant", "./"]
+CONFIG_ROOTS_HA = ["/homeassistant", "/conf", "/config", "./"]
 TIME_FORMAT_HA = "%Y-%m-%dT%H:%M:%S%z"
 TIMEOUT = 60 * 5
+CONFIG_REFRESH_PERIOD = 60 * 8
 
 # 240v x 100 amps x 3 phases / 1000 to kW / 60 minutes in an hour is the maximum kWh in a 1 minute period
 MAX_INCREMENT = 240 * 100 * 3 / 1000 / 60
@@ -208,6 +216,13 @@ CONFIG_ITEMS = [
     {
         "name": "inverter_soc_reset",
         "friendly_name": "Inverter SOC Reset",
+        "type": "switch",
+        "enable": "expert_mode",
+        "default": True,
+    },
+    {
+        "name": "inverter_set_charge_before",
+        "friendly_name": "Inverter Set charge window before start",
         "type": "switch",
         "enable": "expert_mode",
         "default": True,
@@ -1150,7 +1165,7 @@ INVERTER_DEF = {
         "has_ge_inverter_mode": False,
         "time_button_press": False,
         "clock_time_format": "%Y-%m-%d %H:%M:%S",
-        "write_and_poll_sleep": 2,
+        "write_and_poll_sleep": 5,
         "has_time_window": False,
         "support_charge_freeze": False,
         "support_discharge_freeze": False,
@@ -2249,13 +2264,13 @@ class Inverter:
                 if service:
                     if addon:
                         self.log("Calling restart service {} with addon {}".format(service, addon))
-                        self.base.call_service(service, addon=addon)
+                        self.base.call_service_wrapper(service, addon=addon)
                     elif entity_id:
                         self.log("Calling restart service {} with entity_id {}".format(service, entity_id))
-                        self.base.call_service(service, entity_id=entity_id)
+                        self.base.call_service_wrapper(service, entity_id=entity_id)
                     else:
                         self.log("Calling restart service {}".format(service))
-                        self.base.call_service(service)
+                        self.base.call_service_wrapper(service)
                     self.base.call_notify("Auto-restart service {} called due to: {}".format(service, reason))
                     time.sleep(15)
             raise Exception("Auto-restart triggered")
@@ -2364,7 +2379,7 @@ class Inverter:
         if self.inv_has_timed_pause:
             entity_mode = self.base.get_arg("pause_mode", indirect=False, index=self.id)
             if entity_mode:
-                old_pause_mode = self.base.get_state(entity_mode)
+                old_pause_mode = self.base.get_state_wrapper(entity_mode)
                 if old_pause_mode is None:
                     self.inv_has_timed_pause = False
                     self.log("Inverter {} does not have timed pause support enabled".format(self.id))
@@ -2846,7 +2861,7 @@ class Inverter:
 
         entity_id = f"sensor.{prefix}_{self.inverter_type}_{self.id}_{entity_name}"
 
-        if not self.base.entity_exists(entity_id):
+        if self.base.get_state_wrapper(entity_id) is None:
             attributes = {
                 "state_class": "measurement",
             }
@@ -2856,8 +2871,7 @@ class Inverter:
             if device_class is not None:
                 attributes["device_class"] = device_class
 
-            entity = self.base.get_entity(entity_id)
-            entity.set_state(state=value, attributes=attributes)
+            self.base.set_state_wrapper(entity_id, state=value, attributes=attributes)
         return entity_id
 
     def update_status(self, minutes_now, quiet=False):
@@ -2994,12 +3008,11 @@ class Inverter:
 
             # Update simulated charge enable time to match the charge window time.
             if not self.inv_has_charge_enable_time:
-                entity = self.base.get_entity(self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id))
                 if charge_start_time == charge_end_time:
                     self.charge_enable_time = False
                 else:
                     self.charge_enable_time = True
-                self.write_and_poll_switch("scheduled_charge_enable", entity, self.charge_enable_time)
+                self.write_and_poll_switch("scheduled_charge_enable", self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id), self.charge_enable_time)
                 self.log("Inverter {} scheduled_charge_enable set to {}".format(self.id, self.charge_enable_time))
 
             # Track charge start/end
@@ -3097,9 +3110,9 @@ class Inverter:
                 self.discharge_enable_time = False
             else:
                 self.discharge_enable_time = True
-            entity = self.base.get_entity(self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id))
-            self.write_and_poll_switch("scheduled_discharge_enable", entity, self.discharge_enable_time)
-            self.log("Inverter {} {} set to {}".format(self.id, self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id), self.discharge_enable_time))
+            entity_id = self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id)
+            self.write_and_poll_switch("scheduled_discharge_enable", entity_id, self.discharge_enable_time)
+            self.log("Inverter {} {} set to {}".format(self.id, entity_id, self.discharge_enable_time))
 
         # Tracking for idle time
         if self.discharge_enable_time:
@@ -3226,8 +3239,7 @@ class Inverter:
                 if self.rest_data:
                     self.rest_setReserve(reserve)
                 else:
-                    entity_soc = self.base.get_entity(self.base.get_arg("reserve", indirect=False, index=self.id))
-                    self.write_and_poll_value("reserve", entity_soc, reserve)
+                    self.write_and_poll_value("reserve", self.base.get_arg("reserve", indirect=False, index=self.id), reserve)
                 if self.base.set_inverter_notify:
                     self.base.call_notify("Predbat: Inverter {} Target Reserve has been changed to {} at {}".format(self.id, reserve, self.base.time_now_str()))
             self.mqtt_message(topic="set/reserve", payload=reserve)
@@ -3274,8 +3286,9 @@ class Inverter:
                     self.rest_setChargeRate(new_rate)
                 else:
                     if "charge_rate" in self.base.args:
-                        entity = self.base.get_entity(self.base.get_arg("charge_rate", indirect=False, index=self.id))
-                        self.write_and_poll_value("charge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_charge * MINUTE_WATT / 12))
+                        self.write_and_poll_value(
+                            "charge_rate", self.base.get_arg("charge_rate", indirect=False, index=self.id), new_rate, fuzzy=(self.battery_rate_max_charge * MINUTE_WATT / 12)
+                        )
 
                     if self.inv_output_charge_control == "current":
                         self.set_current_from_power("charge", new_rate)
@@ -3322,8 +3335,12 @@ class Inverter:
                     self.rest_setDischargeRate(new_rate)
                 else:
                     if "discharge_rate" in self.base.args:
-                        entity = self.base.get_entity(self.base.get_arg("discharge_rate", indirect=False, index=self.id))
-                        self.write_and_poll_value("discharge_rate", entity, new_rate, fuzzy=(self.battery_rate_max_discharge * MINUTE_WATT / 25))
+                        self.write_and_poll_value(
+                            "discharge_rate",
+                            self.base.get_arg("discharge_rate", indirect=False, index=self.id),
+                            new_rate,
+                            fuzzy=(self.battery_rate_max_discharge * MINUTE_WATT / 25),
+                        )
 
                     if self.inv_output_charge_control == "current":
                         self.set_current_from_power("discharge", new_rate)
@@ -3370,8 +3387,7 @@ class Inverter:
                 if self.rest_data:
                     self.rest_setChargeTarget(soc)
                 else:
-                    entity_soc = self.base.get_entity(self.base.get_arg("charge_limit", indirect=False, index=self.id))
-                    self.write_and_poll_value("charge_limit", entity_soc, soc)
+                    self.write_and_poll_value("charge_limit", self.base.get_arg("charge_limit", indirect=False, index=self.id), soc)
 
                 if self.base.set_inverter_notify:
                     self.base.call_notify("Predbat: Inverter {} Target SOC has been changed to {} % at {}".format(self.id, soc, self.base.time_now_str()))
@@ -3386,14 +3402,14 @@ class Inverter:
             else:
                 self.mimic_target_soc(0)
 
-    def write_and_poll_switch(self, name, entity, new_value):
+    def write_and_poll_switch(self, name, entity_id, new_value):
         """
         GivTCP Workaround, keep writing until correct
         """
         # Re-written to minimise writes
-        domain = entity.domain
+        domain, entity_name = entity_id.split(".")
 
-        current_state = entity.get_state()
+        current_state = self.base.get_state_wrapper(entity_id=entity_id)
         if isinstance(current_state, str):
             current_state = current_state.lower() in ["on", "enable", "true"]
 
@@ -3402,33 +3418,33 @@ class Inverter:
             retry += 1
             if domain == "sensor":
                 if new_value:
-                    entity.set_state(state="on")
+                    self.base.set_state_wrapper(state="on", entity_id=entity_id)
                 else:
-                    entity.set_state(state="off")
+                    self.base.set_state_wrapper(state="off", entity_id=entity_id)
             else:
-                if new_value:
-                    entity.call_service("turn_on")
-                else:
-                    entity.call_service("turn_off")
+                base_entity = entity_id.split(".")[0]
+                service = base_entity + "/turn_" + ("on" if new_value else "off")
+                self.base.call_service_wrapper(service, entity_id=entity_id)
 
             time.sleep(self.inv_write_and_poll_sleep)
-            current_state = entity.get_state()
+            current_state = self.base.get_state_wrapper(entity_id=entity_id, refresh=True)
+            self.log("Switch {} is now {}".format(entity_id, current_state))
             if isinstance(current_state, str):
                 current_state = current_state.lower() in ["on", "enable", "true"]
 
         if current_state == new_value:
-            self.base.log("Inverter {} Wrote {} to {} successfully and got {}".format(self.id, name, new_value, entity.get_state()))
+            self.base.log("Inverter {} Wrote {} to {} successfully and got {}".format(self.id, name, new_value, self.base.get_state_wrapper(entity_id=entity_id)))
             return True
         else:
-            self.base.log("WARN: Inverter {} Trying to write {} to {} didn't complete got {}".format(self.id, name, new_value, entity.get_state()))
+            self.base.log("WARN: Inverter {} Trying to write {} to {} didn't complete got {}".format(self.id, name, new_value, self.base.get_state_wrapper(entity_id=entity_id)))
             self.base.record_status("Warn - Inverter {} write to {} failed".format(self.id, name), had_errors=True)
             return False
 
-    def write_and_poll_value(self, name, entity, new_value, fuzzy=0):
+    def write_and_poll_value(self, name, entity_id, new_value, fuzzy=0):
         # Modified to cope with sensor entities and writing strings
         # Re-written to minimise writes
-        domain = entity.domain
-        current_state = entity.get_state()
+        domain, entity_name = entity_id.split(".")
+        current_state = self.base.get_state_wrapper(entity_id)
 
         if isinstance(new_value, str):
             matched = current_state == new_value
@@ -3439,13 +3455,15 @@ class Inverter:
         while (not matched) and (retry < 6):
             retry += 1
             if domain == "sensor":
-                entity.set_state(state=new_value)
+                self.base.set_state_wrapper(entity_id, state=new_value)
             else:
-                # if isinstance(new_value, str):
-                entity.call_service("set_value", value=new_value)
+                entity_base = entity_id.split(".")[0]
+                service = entity_base + "/set_value"
+
+                self.base.call_service_wrapper(service, value=new_value, entity_id=entity_id)
 
             time.sleep(self.inv_write_and_poll_sleep)
-            current_state = entity.get_state()
+            current_state = self.base.get_state_wrapper(entity_id, refresh=True)
             if isinstance(new_value, str):
                 matched = current_state == new_value
             else:
@@ -3462,18 +3480,20 @@ class Inverter:
             self.base.record_status(f"Warn - Inverter {self.id} write to {name} failed", had_errors=True)
             return False
 
-    def write_and_poll_option(self, name, entity, new_value):
+    def write_and_poll_option(self, name, entity_id, new_value):
         """
         GivTCP Workaround, keep writing until correct
         """
         for retry in range(6):
-            entity.call_service("select_option", option=new_value)
+            entity_base = entity_id.split(".")[0]
+            service = entity_base + "/select_option"
+            self.base.call_service_wrapper(service, option=new_value, entity_id=entity_id)
             time.sleep(self.inv_write_and_poll_sleep)
-            old_value = entity.get_state()
+            old_value = self.base.get_state_wrapper(entity_id, refresh=True)
             if old_value == new_value:
                 self.base.log("Inverter {} Wrote {} to {} successfully".format(self.id, name, new_value))
                 return True
-        self.base.log("WARN: Inverter {} Trying to write {} to {} didn't complete got {}".format(self.id, name, new_value, entity.get_state()))
+        self.base.log("WARN: Inverter {} Trying to write {} to {} didn't complete got {}".format(self.id, name, new_value, self.base.get_state_wrapper(entity_id, refresh=True)))
         self.base.record_status("Warn - Inverter {} write to {} failed".format(self.id, name), had_errors=True)
         return False
 
@@ -3495,25 +3515,19 @@ class Inverter:
 
         # As not all inverters have these options we need to gracefully give up if its missing
         if entity_mode:
-            old_pause_mode = self.base.get_state(entity_mode)
-            if old_pause_mode is not None:
-                entity_mode = self.base.get_entity(entity_mode)
-            else:
+            old_pause_mode = self.base.get_state_wrapper(entity_mode)
+            if old_pause_mode is None:
                 entity_mode = None
 
         if entity_start:
-            old_start_time = self.base.get_state(entity_start)
-            if old_start_time is not None:
-                entity_start = self.base.get_entity(entity_start)
-            else:
+            old_start_time = self.base.get_state_wrapper(entity_start)
+            if old_start_time is None:
                 entity_start = None
                 self.log("Note: Inverter {} does not have pause_start_time entity".format(self.id))
 
         if entity_end:
-            old_end_time = self.base.get_state(entity_end)
-            if old_end_time is not None:
-                entity_end = self.base.get_entity(entity_end)
-            else:
+            old_end_time = self.base.get_state_wrapper(entity_end)
+            if old_end_time is None:
                 self.log("Note: Inverter {} does not have pause_end_time entity".format(self.id))
                 entity_end = None
 
@@ -3536,16 +3550,16 @@ class Inverter:
 
         if old_start_time and old_start_time != new_start_time:
             # Don't poll as inverters with no registers will fail
-            entity_start.set_state(state=new_start_time)
+            self.base.set_state_wrapper(entity_start, state=new_start_time)
             self.base.log("Inverter {} set pause start time to {}".format(self.id, new_start_time))
         if old_end_time and old_end_time != new_end_time:
             # Don't poll as inverters with no registers will fail
-            entity_end.set_state(state=new_end_time)
+            self.base.set_state_wrapper(entity_end, state=new_end_time)
             self.base.log("Inverter {} set pause end time to {}".format(self.id, new_end_time))
 
         # Set the mode
         if new_pause_mode != old_pause_mode:
-            self.write_and_poll_option("inverter_mode", entity_mode, new_pause_mode)
+            self.write_and_poll_option("pause_mode", entity_mode, new_pause_mode)
 
             if self.base.set_inverter_notify:
                 self.base.call_notify("Predbat: Inverter {} pause mode to set {} at time {}".format(self.id, new_pause_mode, self.base.time_now_str()))
@@ -3600,11 +3614,11 @@ class Inverter:
                 if self.rest_data:
                     self.rest_setBatteryMode(new_inverter_mode)
                 else:
-                    entity = self.base.get_entity(self.base.get_arg("inverter_mode", indirect=False, index=self.id))
+                    entity_id = self.base.get_arg("inverter_mode", indirect=False, index=self.id)
                     if self.inv_has_ge_inverter_mode:
-                        self.write_and_poll_option("inverter_mode", entity, new_inverter_mode)
+                        self.write_and_poll_option("inverter_mode", entity_id, new_inverter_mode)
                     else:
-                        self.write_and_poll_value("inverter_mode", entity, new_inverter_mode)
+                        self.write_and_poll_value("inverter_mode", entity_id, new_inverter_mode)
 
                 # Notify
                 if self.base.set_inverter_notify:
@@ -3675,19 +3689,19 @@ class Inverter:
 
         # Write idle start/end time
         if self.inv_has_idle_time:
-            entity_idle_start_time = self.base.get_entity(self.base.get_arg("idle_start_time", indirect=False, index=self.id))
-            entity_idle_end_time = self.base.get_entity(self.base.get_arg("idle_end_time", indirect=False, index=self.id))
+            idle_start_time_id = self.base.get_arg("idle_start_time", indirect=False, index=self.id)
+            idle_end_time_id = self.base.get_arg("idle_end_time", indirect=False, index=self.id)
 
-            if entity_idle_start_time and entity_idle_end_time:
+            if idle_start_time_id and idle_end_time_id:
                 old_start = self.base.get_arg("idle_start_time", index=self.id)
                 old_end = self.base.get_arg("idle_end_time", index=self.id)
 
                 if old_start != idle_start:
                     self.base.log("Inverter {} set new idle start time to {} was {}".format(self.id, idle_start, old_start))
-                    self.write_and_poll_option("idle_start_time", entity_idle_start_time, idle_start)
+                    self.write_and_poll_option("idle_start_time", idle_start_time_id, idle_start)
                 if old_end != idle_end:
                     self.base.log("Inverter {} set new idle end time to {} was {}".format(self.id, idle_end, old_end))
-                    self.write_and_poll_option("idle_end_time", entity_idle_end_time, idle_end)
+                    self.write_and_poll_option("idle_end_time", idle_end_time_id, idle_end)
 
     def window2minutes(self, start, end, format, minutes_now):
         """
@@ -3796,18 +3810,16 @@ class Inverter:
                 elif "discharge_start_time" in self.base.args:
                     # Always write to this as it is the GE default
                     changed_start_end = True
-                    entity_discharge_start_time = self.base.get_entity(self.base.get_arg("discharge_start_time", indirect=False, index=self.id))
+                    entity_discharge_start_time_id = self.base.get_arg("discharge_start_time", indirect=False, index=self.id)
                     if self.inv_charge_time_entity_is_option:
-                        self.write_and_poll_option("discharge_start_time", entity_discharge_start_time, new_start)
+                        self.write_and_poll_option("discharge_start_time", entity_discharge_start_time_id, new_start)
                     else:
-                        self.write_and_poll_value("discharge_start_time", entity_discharge_start_time, new_start)
+                        self.write_and_poll_value("discharge_start_time", entity_discharge_start_time_id, new_start)
 
                     if self.inv_charge_time_format == "H M":
                         # If the inverter uses hours and minutes then write to these entities too
-                        entity = self.base.get_entity(self.base.get_arg("discharge_start_hour", indirect=False, index=self.id))
-                        self.write_and_poll_value("discharge_start_hour", entity, int(new_start[:2]))
-                        entity = self.base.get_entity(self.base.get_arg("discharge_start_minute", indirect=False, index=self.id))
-                        self.write_and_poll_value("discharge_start_minute", entity, int(new_start[3:5]))
+                        self.write_and_poll_value("discharge_start_hour", self.base.get_arg("discharge_start_hour", indirect=False, index=self.id), int(new_start[:2]))
+                        self.write_and_poll_value("discharge_start_minute", self.base.get_arg("discharge_start_minute", indirect=False, index=self.id), int(new_start[3:5]))
                 else:
                     self.log("WARN: Inverter {} unable write discharge start time as neither REST or discharge_start_time are set".format(self.id))
 
@@ -3822,18 +3834,16 @@ class Inverter:
                 elif "discharge_end_time" in self.base.args:
                     # Always write to this as it is the GE default
                     changed_start_end = True
-                    entity_discharge_end_time = self.base.get_entity(self.base.get_arg("discharge_end_time", indirect=False, index=self.id))
+                    entity_discharge_end_time_id = self.base.get_arg("discharge_end_time", indirect=False, index=self.id)
                     if self.inv_charge_time_entity_is_option:
-                        self.write_and_poll_option("discharge_end_time", entity_discharge_end_time, new_end)
+                        self.write_and_poll_option("discharge_end_time", entity_discharge_end_time_id, new_end)
                         # If the inverter uses hours and minutes then write to these entities too
                     else:
-                        self.write_and_poll_value("discharge_end_time", entity_discharge_end_time, new_end)
+                        self.write_and_poll_value("discharge_end_time", entity_discharge_end_time_id, new_end)
 
                     if self.inv_charge_time_format == "H M":
-                        entity = self.base.get_entity(self.base.get_arg("discharge_end_hour", indirect=False, index=self.id))
-                        self.write_and_poll_value("discharge_end_hour", entity, int(new_end[:2]))
-                        entity = self.base.get_entity(self.base.get_arg("discharge_end_minute", indirect=False, index=self.id))
-                        self.write_and_poll_value("discharge_end_minute", entity, int(new_end[3:5]))
+                        self.write_and_poll_value("discharge_end_hour", self.base.get_arg("discharge_end_hour", indirect=False, index=self.id), int(new_end[:2]))
+                        self.write_and_poll_value("discharge_end_minute", self.base.get_arg("discharge_end_minute", indirect=False, index=self.id), int(new_end[3:5]))
                 else:
                     self.log("WARN: Inverter {} unable write discharge end time as neither REST or discharge_end_time are set".format(self.id))
 
@@ -3844,13 +3854,11 @@ class Inverter:
         # Change scheduled discharge enable
         if force_discharge and not old_discharge_enable:
             if not SIMULATE:
-                entity = self.base.get_entity(self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id))
-                self.write_and_poll_switch("scheduled_discharge_enable", entity, True)
+                self.write_and_poll_switch("scheduled_discharge_enable", self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id), True)
                 self.log("Inverter {} Turning on scheduled discharge".format(self.id))
         elif not force_discharge and old_discharge_enable:
             if not SIMULATE:
-                entity = self.base.get_entity(self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id))
-                self.write_and_poll_switch("scheduled_discharge_enable", entity, False)
+                self.write_and_poll_switch("scheduled_discharge_enable", self.base.get_arg("scheduled_discharge_enable", indirect=False, index=self.id), False)
                 self.log("Inverter {} Turning off scheduled discharge".format(self.id))
 
         # REST version of writing slot
@@ -3912,8 +3920,7 @@ class Inverter:
                 if self.rest_data:
                     self.rest_enableChargeSchedule(False)
                 else:
-                    entity = self.base.get_entity(self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id))
-                    self.write_and_poll_switch("scheduled_charge_enable", entity, False)
+                    self.write_and_poll_switch("scheduled_charge_enable", self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id), False)
                     # If there's no charge enable switch then we can enable using start and end time
                     if not self.inv_has_charge_enable_time and (self.inv_output_charge_control == "current"):
                         self.enable_charge_discharge_with_time_current("charge", False)
@@ -3944,8 +3951,7 @@ class Inverter:
             solax_modes = SOLAX_SOLIS_MODES_NEW if self.base.get_arg("solax_modbus_new", True) else SOLAX_SOLIS_MODES
 
             entity_id = self.base.get_arg("energy_control_switch", indirect=False, index=self.id)
-            entity = self.base.get_entity(entity_id)
-            switch = solax_modes.get(entity.get_state(), 0)
+            switch = solax_modes.get(self.base.get_state_wrapper(entity_id), 0)
 
             if direction == "charge":
                 if enable:
@@ -3967,7 +3973,7 @@ class Inverter:
 
             if new_switch != switch:
                 self.base.log(f"Setting Solis Energy Control Switch to {new_switch} {new_mode} from {switch} {old_mode} for {direction} {enable}")
-                self.write_and_poll_option(name=entity_id, entity=entity, new_value=new_mode)
+                self.write_and_poll_option(name=entity_id, entity=entity_id, new_value=new_mode)
             else:
                 self.base.log(f"Solis Energy Control Switch setting {switch} {new_mode} unchanged for {direction} {enable}")
 
@@ -3984,7 +3990,7 @@ class Inverter:
         Send an MQTT message via service
         """
         if self.inv_has_mqtt_api:
-            self.base.call_service("mqtt/publish", qos=1, retain=True, topic=(self.inv_mqtt_topic + "/" + topic), payload=payload)
+            self.base.call_service_wrapper("mqtt/publish", qos=1, retain=True, topic=(self.inv_mqtt_topic + "/" + topic), payload=payload)
 
     def enable_charge_discharge_with_time_current(self, direction, enable):
         """
@@ -4000,8 +4006,7 @@ class Inverter:
                 for x in ["start", "end"]:
                     for y in ["hour", "minute"]:
                         name = f"{direction}_{x}_{y}"
-                        entity = self.base.get_entity(self.base.get_arg(name, indirect=False, index=self.id))
-                        self.write_and_poll_value(name, entity, 0)
+                        self.write_and_poll_value(name, self.base.get_arg(name, indirect=False, index=self.id), 0)
             else:
                 self.set_current_from_power(direction, 0)
 
@@ -4010,8 +4015,7 @@ class Inverter:
         Set the timed charge/discharge current setting by converting power to current
         """
         new_current = round(power / self.battery_voltage, self.inv_current_dp)
-        entity = self.base.get_entity(self.base.get_arg(f"timed_{direction}_current", indirect=False, index=self.id))
-        self.write_and_poll_value(f"timed_{direction}_current", entity, new_current, fuzzy=1)
+        self.write_and_poll_value(f"timed_{direction}_current", self.base.get_arg(f"timed_{direction}_current", indirect=False, index=self.id), new_current, fuzzy=1)
 
     def call_service_template(self, service, data):
         """
@@ -4038,7 +4042,7 @@ class Inverter:
             if service_name:
                 service_name = service_name.replace(".", "/")
                 self.log("Inverter {} Call service {} with data {}".format(self.id, service_name, service_data))
-                self.base.call_service(service_name, **service_data)
+                self.base.call_service_wrapper(service_name, **service_data)
             else:
                 self.log("WARN: Inverter {} unable to find service name for {}".format(self.id, service))
         else:
@@ -4156,18 +4160,16 @@ class Inverter:
                     pass  # REST will be written as start/end together
                 elif "charge_start_time" in self.base.args:
                     # Always write to this as it is the GE default
-                    entity_start = self.base.get_entity(self.base.get_arg("charge_start_time", indirect=False, index=self.id))
+                    entity_id_start = self.base.get_arg("charge_start_time", indirect=False, index=self.id)
                     if self.inv_charge_time_entity_is_option:
-                        self.write_and_poll_option("charge_start_time", entity_start, new_start)
+                        self.write_and_poll_option("charge_start_time", entity_id_start, new_start)
                     else:
-                        self.write_and_poll_value("charge_start_time", entity_start, new_start)
+                        self.write_and_poll_value("charge_start_time", entity_id_start, new_start)
 
                     if self.inv_charge_time_format == "H M":
                         # If the inverter uses hours and minutes then write to these entities too
-                        entity = self.base.get_entity(self.base.get_arg("charge_start_hour", indirect=False, index=self.id))
-                        self.write_and_poll_value("charge_start_hour", entity, int(new_start[:2]))
-                        entity = self.base.get_entity(self.base.get_arg("charge_start_minute", indirect=False, index=self.id))
-                        self.write_and_poll_value("charge_start_minute", entity, int(new_start[3:5]))
+                        self.write_and_poll_value("charge_start_hour", self.base.get_arg("charge_start_hour", indirect=False, index=self.id), int(new_start[:2]))
+                        self.write_and_poll_value("charge_start_minute", self.base.get_arg("charge_start_minute", indirect=False, index=self.id), int(new_start[3:5]))
                 else:
                     self.log("WARN: Inverter {} unable write charge window start as neither REST or charge_start_time are set".format(self.id))
 
@@ -4181,17 +4183,15 @@ class Inverter:
                     pass  # REST will be written as start/end together
                 elif "charge_end_time" in self.base.args:
                     # Always write to this as it is the GE default
-                    entity_end = self.base.get_entity(self.base.get_arg("charge_end_time", indirect=False, index=self.id))
+                    entity_id_end = self.base.get_arg("charge_end_time", indirect=False, index=self.id)
                     if self.inv_charge_time_entity_is_option:
-                        self.write_and_poll_option("charge_end_time", entity_end, new_end)
+                        self.write_and_poll_option("charge_end_time", entity_id_end, new_end)
                     else:
-                        self.write_and_poll_value("charge_end_time", entity_end, new_end)
+                        self.write_and_poll_value("charge_end_time", entity_id_end, new_end)
 
                     if self.inv_charge_time_format == "H M":
-                        entity = self.base.get_entity(self.base.get_arg("charge_end_hour", indirect=False, index=self.id))
-                        self.write_and_poll_value("charge_end_hour", entity, int(new_end[:2]))
-                        entity = self.base.get_entity(self.base.get_arg("charge_end_minute", indirect=False, index=self.id))
-                        self.write_and_poll_value("charge_end_minute", entity, int(new_end[3:5]))
+                        self.write_and_poll_value("charge_end_hour", self.base.get_arg("charge_end_hour", indirect=False, index=self.id), int(new_end[:2]))
+                        self.write_and_poll_value("charge_end_minute", self.base.get_arg("charge_end_hour", indirect=False, index=self.id), int(new_end[3:5]))
                 else:
                     self.log("WARN: Inverter {} unable write charge window end as neither REST, charge_end_hour or charge_end_time are set".format(self.id))
 
@@ -4214,8 +4214,7 @@ class Inverter:
                 if self.rest_data:
                     self.rest_enableChargeSchedule(True)
                 elif "scheduled_charge_enable" in self.base.args:
-                    entity = self.base.get_entity(self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id))
-                    self.write_and_poll_switch("scheduled_charge_enable", entity, True)
+                    self.write_and_poll_switch("scheduled_charge_enable", self.base.get_arg("scheduled_charge_enable", indirect=False, index=self.id), True)
                     if not self.inv_has_charge_enable_time and (self.inv_output_charge_control == "current"):
                         self.enable_charge_discharge_with_time_current("charge", True)
                 else:
@@ -4233,11 +4232,13 @@ class Inverter:
                 self.base.log("Inverter {} Turning on scheduled charge".format(self.id))
 
     def press_and_poll_button(self, entity_id):
+        """
+        Call a button press service (Solis) and wait for the data to update
+        """
         for retry in range(6):
-            self.base.call_service("button/press", entity_id=entity_id)
-            entity = self.base.get_entity(entity_id)
+            self.base.call_service_wrapper("button/press", entity_id=entity_id)
             time.sleep(self.inv_write_and_poll_sleep)
-            time_pressed = datetime.strptime(entity.get_state(), TIME_FORMAT_SECONDS)
+            time_pressed = datetime.strptime(self.base.get_state_wrapper(entity_id, refresh=True), TIME_FORMAT_SECONDS)
 
             if (pytz.timezone("UTC").localize(datetime.now()) - time_pressed).seconds < 10:
                 self.base.log(f"Successfully pressed button {entity_id} on Inverter {self.id}")
@@ -4462,7 +4463,7 @@ class PredBat(hass.Hass):
         Sync wrapper for call_notify
         """
         for device in self.notify_devices:
-            self.call_service("notify/" + device, message=message)
+            self.call_service_wrapper("notify/" + device, message=message)
         return True
 
     async def async_call_notify(self, message):
@@ -4470,7 +4471,7 @@ class PredBat(hass.Hass):
         Send HA notifications
         """
         for device in self.notify_devices:
-            await self.call_service("notify/" + device, message=message)
+            await self.call_service_wrapper("notify/" + device, message=message)
         return True
 
     def resolve_arg(self, arg, value, default=None, indirect=True, combine=False, attribute=None, index=None, extra_args=None):
@@ -4533,9 +4534,9 @@ class PredBat(hass.Hass):
                 value, attribute = value.split("$")
 
             if attribute:
-                value = self.get_state(entity_id=value, default=default, attribute=attribute)
+                value = self.get_state_wrapper(entity_id=value, default=default, attribute=attribute)
             else:
-                value = self.get_state(entity_id=value, default=default)
+                value = self.get_state_wrapper(entity_id=value, default=default)
         return value
 
     def get_arg(self, arg, default=None, indirect=True, combine=False, attribute=None, index=None):
@@ -5097,9 +5098,27 @@ class PredBat(hass.Hass):
         """
         return self.get_history(entity_id=entity_id, days=days)
 
+    def get_state_wrapper(self, entity_id=None, default=None, attribute=None, refresh=False):
+        """
+        Wrapper function to get state from HA
+        """
+        return self.ha_interface.get_state(entity_id=entity_id, default=default, attribute=attribute, refresh=refresh)
+
+    def set_state_wrapper(self, entity_id, state, attributes={}):
+        """
+        Wrapper function to get state from HA
+        """
+        return self.ha_interface.set_state(entity_id, state, attributes=attributes)
+
+    def call_service_wrapper(self, service, **kwargs):
+        """
+        Wrapper function to call a HA service
+        """
+        return self.ha_interface.call_service(service, **kwargs)
+
     def get_history_wrapper(self, entity_id, days=30):
         """
-        Async function to get history from HA using Async task
+        Wrapper function to get history from HA
         """
         history = self.ha_interface.get_history(entity_id, days=days, now=self.now)
 
@@ -5775,12 +5794,15 @@ class PredBat(hass.Hass):
                 "friendly_name": "Status",
                 "detail": extra,
                 "icon": "mdi:information",
-                "last_updated": datetime.now(),
+                "last_updated": str(datetime.now()),
                 "debug": debug,
                 "version": THIS_VERSION,
                 "error": (had_errors or self.had_errors),
             },
         )
+
+        print("Info: record_status {}".format(message + extra))
+
         self.previous_status = message
         if had_errors:
             self.had_errors = True
@@ -9099,8 +9121,11 @@ class PredBat(hass.Hass):
         global PRED_GLOBAL
         PRED_GLOBAL["dict"] = None
 
+        self.define_service_list()
+        self.stop_thread = False
         self.currency_symbols = self.args.get("currency_symbols", "£p")
         self.pool = None
+        self.watch_list = []
         self.restart_active = False
         self.inverter_needs_reset = False
         self.inverter_needs_reset_force = ""
@@ -9160,6 +9185,7 @@ class PredBat(hass.Hass):
         self.inverter_loss = 1.0
         self.inverter_hybrid = True
         self.inverter_soc_reset = False
+        self.inverter_set_charge_before = True
         self.best_soc_min = 0
         self.best_soc_max = 0
         self.best_soc_margin = 0
@@ -11553,11 +11579,11 @@ class PredBat(hass.Hass):
             attribute = "detailedForecast"
             entity_id = self.get_arg(argname, None, indirect=False)
             if entity_id:
-                result = self.get_state(entity_id=entity_id, attribute=attribute)
+                result = self.get_state_wrapper(entity_id=entity_id, attribute=attribute)
                 if not result:
                     attribute = "forecast"
                 try:
-                    data = self.get_state(entity_id=self.get_arg(argname, indirect=False), attribute=attribute)
+                    data = self.get_state_wrapper(entity_id=self.get_arg(argname, indirect=False), attribute=attribute)
                 except (ValueError, TypeError):
                     self.log("WARN: Unable to fetch solar forecast data from sensor {} check your setting of {}".format(self.get_arg(argname, indirect=False), argname))
                     self.record_status("Error - {} not be set correctly, check apps.yaml", debug=self.get_arg(argname, indirect=False), had_errors=True)
@@ -11587,7 +11613,7 @@ class PredBat(hass.Hass):
                     entity_id, attribute = entity_id.split("$")
                 try:
                     self.log("Loading extra load forecast from {} attribute {}".format(entity_id, attribute))
-                    data = self.get_state(entity_id=entity_id, attribute=attribute)
+                    data = self.get_state_wrapper(entity_id=entity_id, attribute=attribute)
                 except (ValueError, TypeError) as e:
                     self.log("Error: Unable to fetch load forecast data from sensor {} exception {}".format(entity_id, e))
                     data = None
@@ -11919,7 +11945,7 @@ class PredBat(hass.Hass):
             required_unit="kWh",
         )
         try:
-            soc_yesterday = float(self.get_state(self.prefix + ".savings_total_soc", default=0.0))
+            soc_yesterday = float(self.get_state_wrapper(self.prefix + ".savings_total_soc", default=0.0))
         except (ValueError, TypeError):
             soc_yesterday = 0.0
 
@@ -12623,11 +12649,19 @@ class PredBat(hass.Hass):
                                 )
                                 inverter.adjust_charge_window(charge_start_time, charge_end_time, self.minutes_now)
                         else:
-                            self.log(
-                                "Not setting charging window yet as not within the window (now {} target set_window_minutes {} charge start time {}".format(
-                                    self.time_abs_str(self.minutes_now), self.set_window_minutes, self.time_abs_str(minutes_start)
+                            if not self.inverter_set_charge_before:
+                                self.log(
+                                    "Disabled charge window while waiting for schedule (now {} target set_window_minutes {} charge start time {})".format(
+                                        self.time_abs_str(self.minutes_now), self.set_window_minutes, self.time_abs_str(minutes_start)
+                                    )
                                 )
-                            )
+                                inverter.disable_charge_window()
+                            else:
+                                self.log(
+                                    "Not setting charging window yet as not within the window (now {} target set_window_minutes {} charge start time {})".format(
+                                        self.time_abs_str(self.minutes_now), self.set_window_minutes, self.time_abs_str(minutes_start)
+                                    )
+                                )
 
                     # Set configured window minutes for the SOC adjustment routine
                     inverter.charge_start_time_minutes = minutes_start
@@ -12637,7 +12671,11 @@ class PredBat(hass.Hass):
                     self.log("No charge window required for 24-hours, disabling before the start")
                     inverter.disable_charge_window()
                 else:
-                    self.log("No change to charge window yet, waiting for schedule.")
+                    if not self.inverter_set_charge_before:
+                        self.log("No change to charge window yet, disabled while waiting for schedule.")
+                        inverter.disable_charge_window()
+                    else:
+                        self.log("No change to charge window yet, waiting for schedule.")
             elif self.set_charge_window and (inverter.charge_start_time_minutes - self.minutes_now) <= self.set_window_minutes:
                 # No charge windows
                 self.log("No charge windows found, disabling before the start")
@@ -12787,7 +12825,7 @@ class PredBat(hass.Hass):
                 elif (
                     self.charge_limit_best
                     and (self.minutes_now < inverter.charge_end_time_minutes)
-                    and ((inverter.charge_start_time_minutes - self.minutes_now) < self.set_soc_minutes)
+                    and ((inverter.charge_start_time_minutes - self.minutes_now) <= self.set_soc_minutes)
                     and not (disabled_charge_window)
                 ):
                     if inverter.inv_has_charge_enable_time or isCharging:
@@ -12899,12 +12937,12 @@ class PredBat(hass.Hass):
 
         if entity_id:
             self.log("Fetching carbon intensity data from {}".format(entity_id))
-            data_all = self.get_state(entity_id=entity_id, attribute="forecast")
+            data_all = self.get_state_wrapper(entity_id=entity_id, attribute="forecast")
             if data_all:
                 carbon_data = self.minute_data(data_all, self.forecast_days, self.now_utc, "intensity", "from", backwards=False, to_key="to")
 
         entity_id = self.prefix + ".carbon_now"
-        state = self.get_state(entity_id=entity_id)
+        state = self.get_state_wrapper(entity_id=entity_id)
         if state is not None:
             try:
                 carbon_history = self.minute_data_import_export(self.now_utc, entity_id, required_unit="g/kWh", increment=False, smoothing=False)
@@ -12936,12 +12974,12 @@ class PredBat(hass.Hass):
             if "_current_rate" in entity_id:
                 # Try as event
                 prev_rate_id = entity_id.replace("_current_rate", "_previous_day_rates").replace("sensor.", "event.")
-                data_import = self.get_state(entity_id=prev_rate_id, attribute="rates")
+                data_import = self.get_state_wrapper(entity_id=prev_rate_id, attribute="rates")
                 if data_import:
                     data_all += data_import
                 else:
                     prev_rate_id = entity_id.replace("_current_rate", "_previous_rate")
-                    data_import = self.get_state(entity_id=prev_rate_id, attribute="all_rates")
+                    data_import = self.get_state_wrapper(entity_id=prev_rate_id, attribute="all_rates")
                     if data_import:
                         data_all += data_import
                     else:
@@ -12954,9 +12992,9 @@ class PredBat(hass.Hass):
                 current_rate_id = entity_id
 
             data_import = (
-                self.get_state(entity_id=current_rate_id, attribute="rates")
-                or self.get_state(entity_id=current_rate_id, attribute="all_rates")
-                or self.get_state(entity_id=current_rate_id, attribute="raw_today")
+                self.get_state_wrapper(entity_id=current_rate_id, attribute="rates")
+                or self.get_state_wrapper(entity_id=current_rate_id, attribute="all_rates")
+                or self.get_state_wrapper(entity_id=current_rate_id, attribute="raw_today")
             )
             if data_import:
                 data_all += data_import
@@ -12966,17 +13004,17 @@ class PredBat(hass.Hass):
             # Next rates
             if "_current_rate" in entity_id:
                 next_rate_id = entity_id.replace("_current_rate", "_next_day_rates").replace("sensor.", "event.")
-                data_import = self.get_state(entity_id=next_rate_id, attribute="rates")
+                data_import = self.get_state_wrapper(entity_id=next_rate_id, attribute="rates")
                 if data_import:
                     data_all += data_import
                 else:
                     next_rate_id = entity_id.replace("_current_rate", "_next_rate")
-                    data_import = self.get_state(entity_id=next_rate_id, attribute="all_rates")
+                    data_import = self.get_state_wrapper(entity_id=next_rate_id, attribute="all_rates")
                     if data_import:
                         data_all += data_import
             else:
                 # Nordpool tomorrow
-                data_import = self.get_state(entity_id=current_rate_id, attribute="raw_tomorrow")
+                data_import = self.get_state_wrapper(entity_id=current_rate_id, attribute="raw_tomorrow")
                 if data_import:
                     data_all += data_import
 
@@ -13138,10 +13176,12 @@ class PredBat(hass.Hass):
             vehicle_pref = {}
             entity_id = self.get_arg("octopus_intelligent_slot", indirect=False)
             try:
-                completed = self.get_state(entity_id=entity_id, attribute="completedDispatches") or self.get_state(entity_id=entity_id, attribute="completed_dispatches")
-                planned = self.get_state(entity_id=entity_id, attribute="plannedDispatches") or self.get_state(entity_id=entity_id, attribute="planned_dispatches")
-                vehicle = self.get_state(entity_id=entity_id, attribute="registeredKrakenflexDevice")
-                vehicle_pref = self.get_state(entity_id=entity_id, attribute="vehicleChargingPreferences")
+                completed = self.get_state_wrapper(entity_id=entity_id, attribute="completedDispatches") or self.get_state_wrapper(
+                    entity_id=entity_id, attribute="completed_dispatches"
+                )
+                planned = self.get_state_wrapper(entity_id=entity_id, attribute="plannedDispatches") or self.get_state_wrapper(entity_id=entity_id, attribute="planned_dispatches")
+                vehicle = self.get_state_wrapper(entity_id=entity_id, attribute="registeredKrakenflexDevice")
+                vehicle_pref = self.get_state_wrapper(entity_id=entity_id, attribute="vehicleChargingPreferences")
             except (ValueError, TypeError):
                 self.log("WARN: Unable to get data from {} - octopus_intelligent_slot may not be set correctly".format(entity_id))
                 self.record_status(message="Error - octopus_intelligent_slot not set correctly", had_errors=True)
@@ -13162,8 +13202,8 @@ class PredBat(hass.Hass):
                     self.car_charging_battery_size[0] = float(vehicle.get("vehicleBatterySizeInKwh", self.car_charging_battery_size[0]))
                     self.car_charging_rate[0] = float(vehicle.get("chargePointPowerInKw", self.car_charging_rate[0]))
                 else:
-                    size = self.get_state(entity_id=entity_id, attribute="vehicle_battery_size_in_kwh")
-                    rate = self.get_state(entity_id=entity_id, attribute="charge_point_power_in_kw")
+                    size = self.get_state_wrapper(entity_id=entity_id, attribute="vehicle_battery_size_in_kwh")
+                    rate = self.get_state_wrapper(entity_id=entity_id, attribute="charge_point_power_in_kw")
                     if size:
                         self.car_charging_battery_size[0] = size
                     if rate:
@@ -13254,12 +13294,12 @@ class PredBat(hass.Hass):
             if entity_id:
                 state = self.get_arg("octopus_saving_session", False)
 
-                joined_events = self.get_state(entity_id=entity_id, attribute="joined_events")
+                joined_events = self.get_state_wrapper(entity_id=entity_id, attribute="joined_events")
                 if not joined_events:
                     entity_id = entity_id.replace("binary_sensor.", "event.").replace("_sessions", "_session_events")
-                    joined_events = self.get_state(entity_id=entity_id, attribute="joined_events")
+                    joined_events = self.get_state_wrapper(entity_id=entity_id, attribute="joined_events")
 
-                available_events = self.get_state(entity_id=entity_id, attribute="available_events")
+                available_events = self.get_state_wrapper(entity_id=entity_id, attribute="available_events")
                 if available_events:
                     for event in available_events:
                         code = event.get("code", None)  # decode the available events structure for code, start/end time & rate
@@ -13680,7 +13720,7 @@ class PredBat(hass.Hass):
         """
 
         self.debug_enable = self.get_arg("debug_enable")
-        self.previous_status = self.get_state(self.prefix + ".status")
+        self.previous_status = self.get_state_wrapper(self.prefix + ".status")
         forecast_hours = max(self.get_arg("forecast_hours", 48), 24)
 
         self.num_cars = self.get_arg("num_cars", 1)
@@ -13783,6 +13823,10 @@ class PredBat(hass.Hass):
         self.best_soc_keep = self.get_arg("best_soc_keep")
         self.set_soc_minutes = 30
         self.set_window_minutes = 30
+        self.inverter_set_charge_before = self.get_arg("inverter_set_charge_before")
+        if not self.inverter_set_charge_before:
+            self.set_soc_minutes = 0
+            self.set_window_minutes = 0
         self.octopus_intelligent_charging = self.get_arg("octopus_intelligent_charging")
         self.octopus_intelligent_ignore_unplugged = self.get_arg("octopus_intelligent_ignore_unplugged")
         self.get_car_charging_planned()
@@ -13925,7 +13969,6 @@ class PredBat(hass.Hass):
         self.minutes_to_midnight = 24 * 60 - self.minutes_now
         self.log("--------------- PredBat - update at {} with clock skew {} minutes, minutes now {}".format(now_utc, skew, self.minutes_now))
 
-    @ad.app_lock
     def update_pred(self, scheduled=True):
         """
         Update the prediction state, everything is called from here right now
@@ -14412,7 +14455,7 @@ class PredBat(hass.Hass):
                         unit = item["unit"]
                         unit = unit.replace("£", self.currency_symbols[0])
                         unit = unit.replace("p", self.currency_symbols[1])
-                        self.set_state(
+                        self.set_state_wrapper(
                             entity_id=entity,
                             state=value,
                             attributes={
@@ -14427,7 +14470,7 @@ class PredBat(hass.Hass):
                     elif item["type"] == "switch":
                         """SWITCH"""
                         icon = item.get("icon", "mdi:light-switch")
-                        self.set_state(entity_id=entity, state=("on" if value else "off"), attributes={"friendly_name": item["friendly_name"], "icon": icon})
+                        self.set_state_wrapper(entity_id=entity, state=("on" if value else "off"), attributes={"friendly_name": item["friendly_name"], "icon": icon})
                     elif item["type"] == "select":
                         """SELECT"""
                         icon = item.get("icon", "mdi:format-list-bulleted")
@@ -14436,10 +14479,10 @@ class PredBat(hass.Hass):
                         options = item["options"]
                         if value not in options:
                             options.append(value)
-                        old_state = self.get_state(entity_id=entity)
+                        old_state = self.get_state_wrapper(entity_id=entity)
                         if old_state and old_state != value:
-                            self.set_state(entity_id=entity, state=old_state, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
-                        self.set_state(entity_id=entity, state=value, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
+                            self.set_state_wrapper(entity_id=entity, state=old_state, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
+                        self.set_state_wrapper(entity_id=entity, state=value, attributes={"friendly_name": item["friendly_name"], "options": options, "icon": icon})
                     elif item["type"] == "update":
                         """UPDATE"""
                         summary = self.releases.get("latest_body", "")
@@ -14447,7 +14490,7 @@ class PredBat(hass.Hass):
                         state = "off"
                         if item["installed_version"] != latest:
                             state = "on"
-                        self.set_state(
+                        self.set_state_wrapper(
                             entity_id=entity,
                             state=state,
                             attributes={
@@ -14486,7 +14529,7 @@ class PredBat(hass.Hass):
         """
         Publish state and log dashboard item
         """
-        self.set_state(entity_id=entity, state=state, attributes=attributes)
+        self.set_state_wrapper(entity_id=entity, state=state, attributes=attributes)
         if entity not in self.dashboard_index:
             self.dashboard_index.append(entity)
 
@@ -14499,9 +14542,10 @@ class PredBat(hass.Hass):
         """
         global PREDBAT_SAVE_RESTORE
         self.save_restore_dir = None
-        for root in CONFIG_ROOTS:
+        for root in CONFIG_ROOTS_HA:
             if os.path.exists(root):
                 self.save_restore_dir = root + "/predbat_save"
+                break
         if not self.save_restore_dir:
             return
 
@@ -14523,9 +14567,10 @@ class PredBat(hass.Hass):
         Restore settings from YAML file
         """
         self.save_restore_dir = None
-        for root in CONFIG_ROOTS:
+        for root in CONFIG_ROOTS_HA:
             if os.path.exists(root):
                 self.save_restore_dir = root + "/predbat_save"
+                break
         if not self.save_restore_dir:
             return
 
@@ -14656,7 +14701,7 @@ class PredBat(hass.Hass):
         """
         Load HA value either from state or from history if there is any
         """
-        ha_value = self.get_state(entity)
+        ha_value = self.get_state_wrapper(entity)
         if ha_value is not None:
             return ha_value
         history = self.get_history_wrapper(entity_id=entity)
@@ -14664,6 +14709,52 @@ class PredBat(hass.Hass):
             history = history[0]
             ha_value = history[-1]["state"]
         return ha_value
+
+    async def trigger_watch_list(self, entity_id, attribute, old, new):
+        """
+        Trigger a watch event for an entity
+        """
+        for entity in self.watch_list:
+            if entity_id == entity:
+                await self.watch_event(entity, attribute, old, new, None)
+
+    async def trigger_callback(self, service_data):
+        """
+        Trigger a callback for a service via HA Interface
+        """
+        for item in self.EVENT_LISTEN_LIST:
+            if item["domain"] == service_data.get("domain", "") and item["service"] == service_data.get("service", ""):
+                await item["callback"](item["service"], service_data, None)
+
+    def define_service_list(self):
+        self.SERVICE_REGISTER_LIST = [
+            {"domain": "input_number", "service": "set_value"},
+            {"domain": "input_number", "service": "increment"},
+            {"domain": "input_number", "service": "decrement"},
+            {"domain": "switch", "service": "turn_on"},
+            {"domain": "switch", "service": "turn_off"},
+            {"domain": "switch", "service": "toggle"},
+            {"domain": "select", "service": "select_option"},
+            {"domain": "select", "service": "select_first"},
+            {"domain": "select", "service": "select_last"},
+            {"domain": "select", "service": "select_next"},
+            {"domain": "select", "service": "select_previous"},
+        ]
+        self.EVENT_LISTEN_LIST = [
+            {"domain": "switch", "service": "turn_on", "callback": self.switch_event},
+            {"domain": "switch", "service": "turn_off", "callback": self.switch_event},
+            {"domain": "switch", "service": "toggle", "callback": self.switch_event},
+            {"domain": "input_number", "service": "set_value", "callback": self.number_event},
+            {"domain": "input_number", "service": "increment", "callback": self.number_event},
+            {"domain": "input_number", "service": "decrement", "callback": self.number_event},
+            {"domain": "select", "service": "select_option", "callback": self.select_event},
+            {"domain": "select", "service": "select_first", "callback": self.select_event},
+            {"domain": "select", "service": "select_last", "callback": self.select_event},
+            {"domain": "select", "service": "select_next", "callback": self.select_event},
+            {"domain": "select", "service": "select_previous", "callback": self.select_event},
+            {"domain": "update", "service": "install", "callback": self.update_event},
+            {"domain": "update", "service": "skip", "callback": self.update_event},
+        ]
 
     def load_user_config(self, quiet=True, register=False):
         """
@@ -14703,9 +14794,9 @@ class PredBat(hass.Hass):
                 item["value"] = None
 
                 # Remove the state if the entity still exists
-                ha_value = self.get_state(entity)
+                ha_value = self.get_state_wrapper(entity)
                 if ha_value is not None:
-                    self.set_state(entity_id=entity, state=ha_value, attributes={"friendly_name": "[Disabled] " + item["friendly_name"]})
+                    self.set_state_wrapper(entity_id=entity, state=ha_value, attributes={"friendly_name": "[Disabled] " + item["friendly_name"]})
                 continue
 
             # Get from current state?
@@ -14747,38 +14838,24 @@ class PredBat(hass.Hass):
                 else:
                     self.expose_config(item["name"], ha_value, quiet=quiet)
 
+        # Update the last time we refreshed the config
+        self.set_state_wrapper(entity_id=self.prefix + ".config_refresh", state=self.now_utc.strftime(TIME_FORMAT))
+
         # Register HA services
         if register:
-            self.fire_event("service_registered", domain="input_number", service="set_value")
-            self.fire_event("service_registered", domain="input_number", service="increment")
-            self.fire_event("service_registered", domain="input_number", service="decrement")
-            self.fire_event("service_registered", domain="switch", service="turn_on")
-            self.fire_event("service_registered", domain="switch", service="turn_off")
-            self.fire_event("service_registered", domain="switch", service="toggle")
-            self.fire_event("service_registered", domain="select", service="select_option")
-            self.fire_event("service_registered", domain="select", service="select_first")
-            self.fire_event("service_registered", domain="select", service="select_last")
-            self.fire_event("service_registered", domain="select", service="select_next")
-            self.fire_event("service_registered", domain="select", service="select_previous")
-            self.listen_select_handle = self.listen_event(self.switch_event, event="call_service", domain="switch", service="turn_on")
-            self.listen_select_handle = self.listen_event(self.switch_event, event="call_service", domain="switch", service="turn_off")
-            self.listen_select_handle = self.listen_event(self.switch_event, event="call_service", domain="switch", service="toggle")
-            self.listen_select_handle = self.listen_event(self.number_event, event="call_service", domain="input_number", service="set_value")
-            self.listen_select_handle = self.listen_event(self.number_event, event="call_service", domain="input_number", service="increment")
-            self.listen_select_handle = self.listen_event(self.number_event, event="call_service", domain="input_number", service="decrement")
-            self.listen_select_handle = self.listen_event(self.select_event, event="call_service", domain="select", service="select_option")
-            self.listen_select_handle = self.listen_event(self.select_event, event="call_service", domain="select", service="select_first")
-            self.listen_select_handle = self.listen_event(self.select_event, event="call_service", domain="select", service="select_last")
-            self.listen_select_handle = self.listen_event(self.select_event, event="call_service", domain="select", service="select_next")
-            self.listen_select_handle = self.listen_event(self.select_event, event="call_service", domain="select", service="select_previous")
-            self.listen_select_handle = self.listen_event(self.update_event, event="call_service", domain="update", service="install")
-            self.listen_select_handle = self.listen_event(self.update_event, event="call_service", domain="update", service="skip")
+            self.watch_list = self.get_arg("watch_list", [], indirect=False)
+            self.log("Watch list {}".format(self.watch_list))
 
-            watch_list = self.get_arg("watch_list", [], indirect=False)
-            self.log("Watch list {}".format(watch_list))
-            for entity in watch_list:
-                if entity and isinstance(entity, str) and ("." in entity):
-                    self.listen_state(self.watch_event, entity_id=entity)
+            if not self.ha_interface.websocket_active:
+                # Registering HA events as Websocket is not active
+                for item in self.SERVICE_REGISTER_LIST:
+                    self.fire_event("service_registered", domain=item["domain"], service=item["service"])
+                for item in self.EVENT_LISTEN_LIST:
+                    self.listen_select_handle = self.listen_event(item["callback"], event="call_service", domain=item["domain"], service=item["service"])
+
+                for entity in self.watch_list:
+                    if entity and isinstance(entity, str) and ("." in entity):
+                        self.listen_state(self.watch_event, entity_id=entity)
 
     def resolve_arg_re(self, arg, arg_value, state_keys):
         """
@@ -14831,7 +14908,7 @@ class PredBat(hass.Hass):
         match arguments with sensors
         """
 
-        states = self.get_state()
+        states = self.get_state_wrapper()
         state_keys = states.keys()
         disabled = []
 
@@ -14898,8 +14975,8 @@ class PredBat(hass.Hass):
                     self.log("WARN: appdaemon section is missing from appdaemon.yaml")
                     passed = False
         else:
-            self.log("WARN: unable to find {}".format(appdaemon_config))
-            passed = False
+            self.log("WARN: unable to find {} skipping checks as maybe outside AppDaemon".format(appdaemon_config))
+            return
 
         self.log("Sanity: Scanning app_dirs: {}".format(app_dirs))
         apps_yaml = []
@@ -14983,11 +15060,11 @@ class PredBat(hass.Hass):
         run_every = RUN_EVERY * 60
         now = self.now
 
-        self.ha_interface = HAInterface(self)
-
         try:
             self.reset()
+            self.ha_interface = HAInterface(self)
             self.sanity()
+            self.ha_interface.update_states()
             self.auto_config()
             self.load_user_config(quiet=False, register=True)
         except Exception as e:
@@ -15048,6 +15125,8 @@ class PredBat(hass.Hass):
         Called once each time the app terminates
         """
         self.log("Predbat terminating")
+        self.stop_thread = True
+        await asyncio.sleep(0)
         if hasattr(self, "pool"):
             if self.pool:
                 self.pool.close()
@@ -15055,13 +15134,14 @@ class PredBat(hass.Hass):
                 self.pool = None
         self.log("Predbat terminated")
 
-    @ad.app_lock
     def update_time_loop(self, cb_args):
         """
         Called every 15 seconds
         """
+        self.check_entity_refresh()
         if self.update_pending and not self.prediction_started:
             self.prediction_started = True
+            self.ha_interface.update_states()
             self.load_user_config()
             self.update_pending = False
             try:
@@ -15075,7 +15155,30 @@ class PredBat(hass.Hass):
                 self.prediction_started = False
             self.prediction_started = False
 
-    @ad.app_lock
+    def check_entity_refresh(self):
+        """
+        Check if we need to refresh the config entities with HA
+        """
+        # Check if we need to refresh the config entities with HA
+        config_refresh = self.get_state_wrapper(entity_id=self.prefix + ".config_refresh")
+        config_refresh_stamp = None
+        if config_refresh:
+            try:
+                config_refresh_stamp = datetime.strptime(config_refresh, TIME_FORMAT)
+            except (ValueError, TypeError):
+                config_refresh_stamp = None
+
+        age = CONFIG_REFRESH_PERIOD
+        if config_refresh_stamp:
+            tdiff = self.now_utc - config_refresh_stamp
+            age = tdiff.seconds / 60 + tdiff.days * 60 * 24
+            if age >= CONFIG_REFRESH_PERIOD:
+                self.log("Info: Refresh config entities due to their age of {} minutes".format(age))
+                self.update_pending = True
+        else:
+            self.log("Info: Refresh config entities as config_refresh state is unknown")
+            self.update_pending = True
+
     def run_time_loop(self, cb_args):
         """
         Called every N minutes
@@ -15083,9 +15186,13 @@ class PredBat(hass.Hass):
         if not self.prediction_started:
             config_changed = False
             self.prediction_started = True
+            self.ha_interface.update_states()
+            self.check_entity_refresh()
+
             if self.update_pending:
                 self.load_user_config()
                 config_changed = True
+
             self.update_pending = False
             try:
                 self.update_pred(scheduled=True)
@@ -15118,12 +15225,179 @@ class HAInterface:
     """
 
     def __init__(self, base):
-        self.ha_key = os.environ.get("SUPERVISOR_TOKEN", None)
-        self.ha_url = "http://supervisor/core"
+        """
+        Initialize the interface to Home Assistant.
+        """
+        self.ha_url = base.args.get("ha_url", "http://supervisor/core")
+        self.ha_key = base.args.get("ha_key", os.environ.get("SUPERVISOR_TOKEN", None))
+        self.websocket_active = False
+
         self.base = base
         self.log = base.log
+        self.state_data = {}
         if not self.ha_key:
-            self.log("WARN: Supervisor token not found, will use direct HA API")
+            self.log("WARN: ha_key or SUPERVISOR_TOKEN not found, you can set ha_url/ha_key in apps.yaml. Will use direct HA API")
+        else:
+            check = self.api_call("/api/")
+            if not check:
+                self.log("WARN: Unable to connect directly to Home Assistant at {}, please check your configuration of ha_url/ha_key".format(self.ha_url))
+                self.ha_key = None
+            else:
+                self.log("Info: Connected to Home Assistant at {}".format(self.ha_url))
+                self.base.create_task(self.socketLoop())
+                self.websocket_active = True
+                self.log("Info: Web Socket task started")
+
+    async def socketLoop(self):
+        """
+        Web socket loop for HA interface
+        """
+        while True:
+            if self.base.stop_thread:
+                self.log("Info: Web socket stopping")
+                break
+
+            url = "{}/api/websocket".format(self.ha_url)
+            self.log("Info: Start socket for url {}".format(url))
+            async with ClientSession() as session:
+                try:
+                    async with session.ws_connect(url) as websocket:
+                        await websocket.send_json({"type": "auth", "access_token": self.ha_key})
+                        sid = 1
+
+                        # Subscribe to all state changes
+                        await websocket.send_json({"id": sid, "type": "subscribe_events", "event_type": "state_changed"})
+                        sid += 1
+
+                        # Listen for services
+                        await websocket.send_json({"id": sid, "type": "subscribe_events", "event_type": "call_service"})
+                        sid += 1
+
+                        # Fire events to say we have registered services
+                        for item in self.base.SERVICE_REGISTER_LIST:
+                            await websocket.send_json(
+                                {"id": sid, "type": "fire_event", "event_type": "service_registered", "event_data": {"service": item["service"], "domain": item["domain"]}}
+                            )
+                            sid += 1
+
+                        self.log("Info: Web Socket active")
+                        self.base.update_pending = True  # Force an update when web-socket reconnects
+
+                        async for message in websocket:
+                            if self.base.stop_thread:
+                                self.log("Info: Web socket stopping")
+                                break
+
+                            if message.type == WSMsgType.TEXT:
+                                try:
+                                    data = json.loads(message.data)
+                                    if data:
+                                        message_type = data.get("type", "")
+                                        if message_type == "event":
+                                            event_info = data.get("event", {})
+                                            event_type = event_info.get("event_type", "")
+                                            if event_type == "state_changed":
+                                                event_data = event_info.get("data", {})
+                                                old_state = event_data.get("old_state", {})
+                                                new_state = event_data.get("new_state", {})
+                                                if new_state:
+                                                    self.update_state_item(new_state)
+                                                    # Only trigger on value change or you get too many updates
+                                                    if new_state.get("state", None) != old_state.get("state", None):
+                                                        await self.base.trigger_watch_list(
+                                                            new_state["entity_id"], event_data.get("attribute", None), event_data.get("old_state", None), new_state
+                                                        )
+                                            elif event_type == "call_service":
+                                                service_data = event_info.get("data", {})
+                                                await self.base.trigger_callback(service_data)
+                                            else:
+                                                self.log("Info: Web Socket unknown message {}".format(data))
+                                        elif message_type == "result":
+                                            success = data.get("success", False)
+                                            if not success:
+                                                self.log("Warn: Web Socket result failed {}".format(data))
+                                        elif message_type == "auth_required":
+                                            pass
+                                        elif message_type == "auth_ok":
+                                            pass
+                                        elif message_type == "auth_invalid":
+                                            self.log("Warn: Web Socket auth failed, check your ha_key setting")
+                                            self.websocket_active = False
+                                            raise Exception("Web Socket auth failed")
+                                        else:
+                                            self.log("Info: Web Socket unknown message {}".format(data))
+                                except Exception as e:
+                                    self.log("Warn Web Socket exception in update loop: {}".format(e))
+                                    break
+
+                            elif message.type == WSMsgType.CLOSED:
+                                break
+                            elif message.type == WSMsgType.ERROR:
+                                break
+
+                except Exception as e:
+                    self.log("Warn: Web Socket exception in startup: {}".format(e))
+                    continue
+
+            if not self.base.stop_thread:
+                self.log("Warn: Web Socket closed, will try to reconnect in 5 seconds")
+                await asyncio.sleep(5)
+
+    def get_state(self, entity_id=None, default=None, attribute=None, refresh=False):
+        """
+        Get state from cached HA data (or from appDaemon if used)
+        """
+        if not self.ha_key:
+            return self.base.get_state(entity_id=entity_id, default=default, attribute=attribute)
+
+        if not entity_id:
+            return self.state_data
+        elif entity_id.lower() in self.state_data:
+            if refresh:
+                self.update_state(entity_id)
+            state_info = self.state_data[entity_id.lower()]
+            if attribute:
+                if attribute in state_info["attributes"]:
+                    return state_info["attributes"][attribute]
+                else:
+                    return default
+            else:
+                return state_info["state"]
+        else:
+            return default
+
+    def update_state(self, entity_id):
+        """
+        Update state for entity_id
+        """
+        if not self.ha_key:
+            return
+        item = self.api_call("/api/states/{}".format(entity_id))
+        if item:
+            self.update_state_item(item)
+
+    def update_state_item(self, item):
+        """
+        Update state table for item
+        """
+        entity_id = item["entity_id"]
+        attributes = item["attributes"]
+        last_changed = item["last_changed"]
+        state = item["state"]
+        self.state_data[entity_id.lower()] = {"state": state, "attributes": attributes, "last_changed": last_changed}
+
+    def update_states(self):
+        """
+        Update the state data from Home Assistant.
+        """
+        if not self.ha_key:
+            return
+        res = self.api_call("/api/states")
+        if res:
+            for item in res:
+                self.update_state_item(item)
+        else:
+            self.log("WARN: Failed to update state data from HA")
 
     def get_history(self, sensor, now, days=30):
         """
@@ -15140,7 +15414,7 @@ class HAInterface:
         res = self.api_call("/api/history/period/{}".format(start.strftime(TIME_FORMAT_HA)), {"filter_entity_id": sensor, "end_time": end.strftime(TIME_FORMAT_HA)})
         return res
 
-    def set_state(self, entity_id, state, attributes=None):
+    def set_state(self, entity_id, state, attributes={}):
         """
         Set the state of an entity in Home Assistant.
         """
@@ -15154,6 +15428,19 @@ class HAInterface:
         if attributes:
             data["attributes"] = attributes
         self.api_call("/api/states/{}".format(entity_id), data, post=True)
+        self.update_state(entity_id)
+
+    def call_service(self, service, **kwargs):
+        """
+        Call a service in Home Assistant.
+        """
+        if not self.ha_key:
+            return self.base.call_service(service, **kwargs)
+
+        data = {}
+        for key in kwargs:
+            data[key] = kwargs[key]
+        self.api_call("/api/services/{}".format(service), data, post=True)
 
     def api_call(self, endpoint, data_in=None, post=False):
         """
@@ -15183,7 +15470,7 @@ class HAInterface:
         try:
             data = response.json()
         except requests.exceptions.JSONDecodeError:
-            self.log("Warn: Failed to decode response from {}".format(url))
+            self.log("Warn: Failed to decode response {} from {}".format(response, url))
             data = None
         except (requests.Timeout, requests.exceptions.ReadTimeout):
             self.log("Warn: Timeout from {}".format(url))
